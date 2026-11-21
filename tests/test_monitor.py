@@ -766,3 +766,30 @@ def test_data_que_ja_passou_nao_esconde_conflito():
     b = op("b", date(2027, 2, 9), datetime(2027, 2, 9, 6), datetime(2027, 2, 9, 9))  # sai antes de 'a' chegar
     assert conflito(antes, b, 3, None, {}) == ""                      # o voo de 2025 "encaixava"
     assert "não encaixa" in conflito(sem_passado(antes, agora), b, 3, None, {})
+
+
+def test_pagina_trancada_so_abre_com_a_senha():
+    import base64
+    import json
+    import re
+
+    import pytest
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    from monitor.pagina import trancar
+
+    pagina = trancar("<p>REC → LIS R$ 1.234,56</p>", "senha certa")
+    assert "1.234,56" not in pagina
+    d = json.loads(re.search(r"const D=(\{.*?\});", pagina).group(1))
+    b = {k: base64.b64decode(d[k]) for k in ("sal", "iv", "cifra")}
+
+    def abrir(senha):
+        chave = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=b["sal"], iterations=d["it"]).derive(senha.encode())
+        return AESGCM(chave).decrypt(b["iv"], b["cifra"], None).decode()
+
+    assert abrir("senha certa") == "<p>REC → LIS R$ 1.234,56</p>"
+    with pytest.raises(InvalidTag):
+        abrir("senha errada")

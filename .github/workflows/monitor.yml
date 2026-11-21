@@ -174,3 +174,39 @@ jobs:
             git pull --rebase --autostash
             git push
           fi
+
+  # Página com senha (GitHub Pages): preços, roteiros e calendário para ver de qualquer lugar.
+  # O conteúdo vai criptografado (AES-256); só abre com a PAGINA_SENHA. Só para ver.
+  pagina:
+    needs: monitorar
+    if: ${{ always() && inputs.simular != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.publicar.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main   # já com os preços que a rodada acabou de salvar
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre
+        run: python -m monitor.cofre abrir tudo
+      - name: Montar a página (trancada com senha)
+        env:
+          PAGINA_SENHA: ${{ secrets.PAGINA_SENHA }}
+        run: python -m monitor.pagina "$RUNNER_TEMP/site"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+      - id: publicar
+        uses: actions/deploy-pages@v4
