@@ -1207,7 +1207,11 @@ def tela_publicar() -> None:
     st.caption("Não precisa esperar a próxima rodada automática (a cada 2h). Os preços entram no histórico e, "
                "se baterem as regras, chega aviso no Telegram. Depois de ~10 min, use ⬇️ Baixar preços novos.")
     so_sk = st.toggle("Só Skiplagged (não gasta a cota do Google)", value=True)
-    if st.button("▶️ Buscar agora"):
+    rodando = [r for r in execucoes(5) if r["status"] in ("in_progress", "queued", "waiting", "pending")]
+    if rodando:
+        st.info("Já tem uma busca rodando no GitHub. Espere ela terminar (acompanhe em Últimas execuções) "
+                "antes de pedir outra.")
+    if st.button("▶️ Buscar agora", disabled=bool(rodando)):
         args = ["gh", "workflow", "run", "monitor.yml", "--repo", REPO]
         if so_sk:
             args += ["-f", "fontes=skiplagged"]
