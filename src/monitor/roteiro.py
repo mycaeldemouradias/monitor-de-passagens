@@ -32,6 +32,7 @@ class Opcao:
     partida: datetime | None     # horário local de saída (None = fonte sem horário, ex.: Kayak)
     chegada: datetime | None     # horário local de chegada
     escalas: str = ""
+    chave: str = ""              # a busca exata (viagem, trecho, datas, adultos): separa configurações antigas
 
 
 class Ligavel(Protocol):  # monitor.models.Rota
@@ -69,7 +70,7 @@ def opcoes(linhas: Iterable[dict]) -> dict[str, dict[date, Opcao]]:
             volta=date.fromisoformat(l["volta"]) if l.get("volta") else None, preco=float(l["preco"]),
             fonte=l["fonte"], vendedor=l.get("vendedor") or "", link=l.get("link") or "", coleta=l["_ts"],
             partida=_dt(l.get("ida_partida")), chegada=_dt(l.get("ida_chegada")),
-            escalas=l.get("ida_conexoes") or "",
+            escalas=l.get("ida_conexoes") or "", chave=l["chave"],
         )
         atual = saida.setdefault(o.rota_id, {}).get(o.data)
         if atual is None or o.preco < atual.preco:
@@ -82,7 +83,7 @@ def opcao_de_oferta(o: Any, coleta: datetime) -> Opcao:
     return Opcao(rota_id=c.rota_id, origem=c.origem, destino=c.destino, data=c.ida, volta=c.volta,
                  preco=o.preco, fonte=o.fonte, vendedor=o.vendedor, link=o.link, coleta=coleta,
                  partida=o.ida.partida if o.ida else None, chegada=o.ida.chegada if o.ida else None,
-                 escalas=o.ida.conexoes_texto() if o.ida else "")
+                 escalas=o.ida.conexoes_texto() if o.ida else "", chave=c.chave)
 
 
 # ------------------------------------------------------------------ vários voos por dia
@@ -110,15 +111,16 @@ def ler_voos(arq: Path) -> dict[str, dict[date, list[Opcao]]]:
     if not arq.exists():
         return {}
     saida: dict[str, dict[date, list[Opcao]]] = {}
-    for d in json.loads(arq.read_text(encoding="utf-8")).values():
+    for k, d in json.loads(arq.read_text(encoding="utf-8")).items():
         dia = date.fromisoformat(d["ida"])
+        chave = k.rsplit("|", 1)[0]
         lista = saida.setdefault(d["rota_id"], {}).setdefault(dia, [])
         for v in d["voos"]:
             lista.append(Opcao(rota_id=d["rota_id"], origem=d["origem"], destino=d["destino"], data=dia,
                                volta=date.fromisoformat(d["volta"]) if d["volta"] else None,
                                preco=float(v["preco"]), fonte=d["fonte"], vendedor=v["vendedor"], link=v["link"],
                                coleta=datetime.fromisoformat(d["coleta"]), partida=_dt(v["partida"]),
-                               chegada=_dt(v["chegada"]), escalas=v["escalas"]))
+                               chegada=_dt(v["chegada"]), escalas=v["escalas"], chave=chave))
     return saida
 
 

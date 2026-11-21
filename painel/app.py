@@ -135,7 +135,10 @@ def frequencia(lista: list[dict], g: Geral) -> dict[str, str]:
 
 @st.cache_data
 def _ler_csv(caminho: str, mtime: float) -> pd.DataFrame:
-    df = pd.read_csv(caminho, dtype=str, keep_default_na=False)
+    try:
+        df = pd.read_csv(caminho, dtype=str, keep_default_na=False)
+    except pd.errors.EmptyDataError:  # arquivo vazio (0 bytes)
+        return pd.DataFrame()
     df["preco"] = pd.to_numeric(df["preco"], errors="coerce")
     coleta = pd.to_datetime(df["data_hora_utc"], utc=True, errors="coerce", format="ISO8601")
     df["coleta"] = coleta.dt.tz_convert(FUSO).dt.tz_localize(None)
@@ -171,6 +174,14 @@ def nomes_por_id() -> dict[str, str]:
 
 
 # ----------------------------------------------------------------- formulário
+def _limitar(valor, minimo: int, maximo: int) -> int:
+    """Valor salvo fora dos limites do formulário (ex.: queda de 90%) não pode derrubar a tela."""
+    try:
+        return min(max(int(round(float(valor))), minimo), maximo)
+    except (TypeError, ValueError):
+        return minimo
+
+
 def campo_aeroporto(titulo: str, codigo: str, chave: str) -> str:
     lista = aeroportos()
     opcoes = list(lista) if codigo in lista or not codigo else [codigo, *lista]
@@ -204,7 +215,7 @@ def campo_datas(chave: str, spec, titulo: str):
             st.caption("👉 Clique também na data final.")
             return None
         passo = st.number_input("Buscar a cada quantos dias?", 1, 30, key=chave + "_passo",
-                                value=int(spec.get("a_cada_dias", 1)) if isinstance(spec, dict) else 1,
+                                value=_limitar(spec.get("a_cada_dias", 1), 1, 30) if isinstance(spec, dict) else 1,
                                 help="1 = todos os dias do período. 2 = um dia sim, outro não…")
         saida = {"de": r[0].isoformat(), "ate": r[1].isoformat()}
         if passo > 1:
@@ -282,10 +293,10 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
                        "da média) e recebe o resumo diário. Quando tiver uma ideia de valor, volte aqui.")
         else:
             alvo = st.number_input("Me avise se ficar abaixo de (R$)", 1, 100_000, step=50, key=k + "_alvo",
-                                   value=int(v.get("preco_alvo") or 1000),
+                                   value=_limitar(v.get("preco_alvo") or 1000, 1, 100_000),
                                    help="Basta UMA regra para avisar. Na ida e volta, é o preço total.")
     queda = c3.number_input("…ou se cair este % abaixo da média", 5, 80, key=k + "_queda",
-                            value=int(v.get("queda_pct") or g.queda_pct_padrao))
+                            value=_limitar(v.get("queda_pct") or g.queda_pct_padrao, 5, 80))
     referencia_preco(v.get("id"))
     with st.expander("Como funcionam os avisos?"):
         st.markdown(REGRAS_TEXTO)
@@ -346,9 +357,25 @@ def confirmar_exclusao(id_: str) -> None:
     v = next((x for x in lista if x["id"] == id_), None)
     if v is None:
         st.rerun()
+    ligadas = [x for x in lista if id_ in (x.get("depois_de") if isinstance(x.get("depois_de"), list)
+                                           else [x.get("depois_de")])]
     st.write(f"Excluir **{nome_viagem(v)}**? Os preços já guardados dela continuam no histórico.")
+    if ligadas:
+        st.warning("Estas viagens estão ligadas a ela e vão perder essa ligação: "
+                   + ", ".join(nome_viagem(x) for x in ligadas))
     if st.button("Sim, excluir", type="primary"):
-        if gravar([x for x in lista if x["id"] != id_], "Viagem excluída"):
+        restantes = []
+        for x in lista:
+            if x["id"] == id_:
+                continue
+            deps = x.get("depois_de")
+            if deps:
+                deps = [d for d in (deps if isinstance(deps, list) else [deps]) if d != id_]
+                x["depois_de"] = deps or None
+                if not deps:
+                    x["intervalo_min_horas"] = x["intervalo_max_horas"] = None
+            restantes.append(x)
+        if gravar(restantes, "Viagem excluída"):
             st.rerun()
 
 
@@ -362,12 +389,20 @@ def alternar_viagem(id_: str, chave: str) -> None:
         st.toast("Ligada" if st.session_state[chave] else "Desligada", icon="✅")
     except ValueError as e:
         st.session_state["erro_toggle"] = str(e)
+        st.session_state[chave] = not st.session_state[chave]  # não salvou: o botão volta para onde estava
 
 
 # ----------------------------------------------------------------- telas
 def mostrar_precos(df: pd.DataFrame, id_: str) -> None:
-    """Menor preço das últimas 24h e menor já visto, no cartão da viagem."""
+    """Menor preço das últimas 24h e menor já visto, no cartão da viagem (só a configuração atual)."""
     d = df[df["rota_id"] == id_] if not df.empty else df
+    if not d.empty:
+        v = next((x for x in viagens() if x["id"] == id_), None)
+        if v:
+            try:
+                d = d[d["chave"].isin({c.chave for c in consultas(v)})]
+            except Exception:  # noqa: BLE001
+                pass
     if d.empty:
         st.caption("💰 Ainda sem preço coletado. (Depois das rodadas, use ⬇️ Baixar preços novos em Salvar e publicar.)")
         return
@@ -427,8 +462,27 @@ def tela_viagens() -> None:
     if not lista:
         st.info("Nenhuma viagem cadastrada ainda.")
 
+    def datas_da(v: dict) -> list[date]:
+        try:
+            return [c.ida for c in consultas(v)]
+        except Exception:  # noqa: BLE001
+            return []
+    meses_v = sorted({(d.year, d.month) for v in lista for d in datas_da(v)})
+    c1, c2 = st.columns(2)
+    ordem = c1.selectbox("Ordenar por", ["Data da viagem (mais cedo primeiro)", "Data da viagem (mais tarde primeiro)",
+                                         "Nome", "Ordem em que cadastrei"], key="viagens_ordem")
+    filtro = c2.multiselect("Mostrar só as viagens de", meses_v, key="viagens_meses", placeholder="Todos os meses",
+                            format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
+    mostrar = [v for v in lista if not filtro or any((d.year, d.month) in filtro for d in datas_da(v))]
+    if ordem.startswith("Data"):
+        mostrar.sort(key=lambda v: min(datas_da(v), default=date.max), reverse="tarde" in ordem)
+    elif ordem == "Nome":
+        mostrar.sort(key=lambda v: nome_viagem(v).lower())
+    if filtro:
+        st.caption(f"Mostrando {len(mostrar)} de {len(lista)} viagens.")
+
     df = historico()
-    for v in lista:
+    for v in mostrar:
         with st.container(border=True):
             c1, c2 = st.columns([5, 2])
             ida_volta = bool(v.get("volta") or v.get("duracao_dias"))
@@ -471,7 +525,7 @@ def tela_viagens() -> None:
                     st.session_state["editando"] = v["id"]
                     st.rerun()
                 if b2.button("🧪", key=f"te_{v['id']}", help="Testar agora"):
-                    st.session_state["testar_id"] = v["id"]
+                    st.session_state["testar_sel"] = v["id"]
                     st.switch_page(PAGINAS["testar"])
                 if b3.button("🗑️", key=f"ex_{v['id']}", help="Excluir"):
                     confirmar_exclusao(v["id"])
@@ -517,7 +571,7 @@ def _mais_baratos_do_dia(chips: list) -> dict:
 
 
 def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
-                    voos: dict | None = None, rotas_lig: dict | None = None) -> str:
+                    voos: dict | None = None, rotas_lig: dict | None = None, clicavel: bool = False) -> str:
     import calendar
     import html
 
@@ -591,7 +645,8 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                     dias = (o.chegada.date() - o.partida.date()).days
                     hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
                             + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
-                cel.append(f'<div class="{classes}" title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
+                marca_id = f' data-id="{html.escape(r)}|{dia.isoformat()}"' if clicavel else ""
+                cel.append(f'<div class="{classes}"{marca_id} title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
                            f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
             linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
         linhas.append("</tr>")
@@ -677,26 +732,55 @@ def dados_atuais(df: pd.DataFrame, lista: list[dict]) -> tuple[dict, dict]:
     O histórico guarda também datas antigas (de antes de você mudar uma viagem): elas ficam de fora.
     """
     from monitor.roteiro import ler_voos, todos_os_voos
-    validas: dict[str, set] = {}
+    chaves = chaves_atuais(lista)
+    op = opcoes(r for r in df.to_dict("records") if r.get("chave") in chaves)
+    voos = todos_os_voos(op, ler_voos(DADOS / "voos.json"))
+    voos = {r: {d: [o for o in l if o.chave in chaves] for d, l in dias.items()} for r, dias in voos.items()}
+    voos = {r: {d: l for d, l in dias.items() if l} for r, dias in voos.items()}
+    return {r: d for r, d in op.items() if d}, {r: d for r, d in voos.items() if d}
+
+
+def chaves_atuais(lista: list[dict]) -> set[str]:
+    """As buscas exatas que as viagens ativas fazem AGORA (datas, volta, adultos). Preços de configurações
+    antigas (ex.: antes de mudar a data ou o nº de adultos) ficam de fora."""
+    chaves: set[str] = set()
     for v in lista:
         if v.get("ativa", True):
             try:
-                validas[v["id"]] = {c.ida for c in consultas(v)}
+                chaves |= {c.chave for c in consultas(v)}
             except Exception:  # noqa: BLE001
                 pass
-    op_todos = opcoes(df.to_dict("records"))
-    op = {r: {d: o for d, o in dias.items() if d in validas.get(r, set())} for r, dias in op_todos.items()}
-    voos = todos_os_voos(op, ler_voos(DADOS / "voos.json"))
-    voos = {r: {d: l for d, l in dias.items() if d in validas.get(r, set())} for r, dias in voos.items()}
-    return {r: d for r, d in op.items() if d}, {r: d for r, d in voos.items() if d}
+    return chaves
+
+
+def filtro_meses(meses: list[tuple[int, int]], chave: str) -> list[tuple[int, int]]:
+    """Escolher quais meses mostrar (um ou vários). Padrão: a partir do mês atual."""
+    hoje = date.today()
+    padrao = [m for m in meses if m >= (hoje.year, hoje.month)] or meses
+    escolha = st.multiselect("Meses", meses, default=padrao, key=chave, placeholder="Escolha os meses",
+                             format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
+    return sorted(escolha)
+
+
+_calendario_clicavel = None
+
+
+def calendario_clicavel(html_cal: str, selecionados: list[str], chave: str) -> list[str]:
+    global _calendario_clicavel
+    if _calendario_clicavel is None:
+        import streamlit.components.v1 as components
+        _calendario_clicavel = components.declare_component(
+            "calendario_clicavel", path=str(Path(__file__).resolve().parent / "componentes" / "calendario"))
+    valor = _calendario_clicavel(html=html_cal, selecionados=selecionados, key=chave, default=None)
+    return selecionados if valor is None else list(valor)
 
 
 def tela_simulador() -> None:
     from monitor.aeroportos import mesma_cidade
     st.title("🧮 Simular viagem")
-    st.caption("Marque no calendário as passagens que você compraria. Abaixo aparecem as rotas na ordem, o valor "
-               "total e se algum voo se sobrepõe a outro. ★ = o mais barato do dia entre as rotas para o mesmo "
-               "destino ou da mesma origem. Nada aqui muda suas viagens nem os avisos.")
+    st.caption("O mesmo calendário de \"Calendário e roteiros\": **clique num voo para marcar** (fica azul) e "
+               "clique de novo para desmarcar. Embaixo aparecem as rotas na ordem, o valor total e se algum voo se "
+               "sobrepõe. O fundo colorido mostra onde você estaria. Nada aqui muda suas viagens nem os avisos.")
     df = historico()
     if df.empty:
         sem_dados()
@@ -707,62 +791,56 @@ def tela_simulador() -> None:
     if not op:
         sem_dados()
         return
-    if st.button("🧹 Limpar seleção"):
-        for k in [k for k in st.session_state if str(k).startswith("sim_")]:
-            del st.session_state[k]
-        st.rerun()
+    rotas_lig = {r.id: r for r in _rotas_obj(lista)}
+    marcados = [x for x in st.session_state.get("sim_marcados", [])
+                if x.split("|")[0] in op and date.fromisoformat(x.split("|")[1]) in op[x.split("|")[0]]]
 
-    import calendar
-    por_dia: dict = defaultdict(list)
-    for r, dias in op.items():
-        for d, o in dias.items():
-            por_dia[d].append(o)
-    meses = sorted({(d.year, d.month) for d in por_dia})
-    for ano, mes in meses:
-        st.markdown(f"#### {MESES[mes - 1].capitalize()} de {ano}")
-        cab = st.columns(7)
-        for c, nome_dia in zip(cab, DIAS):
-            c.markdown(f"**{nome_dia}**")
-        for semana in calendar.Calendar(firstweekday=0).monthdatescalendar(ano, mes):
-            cols = st.columns(7)
-            for c, dia in zip(cols, semana):
-                with c.container(border=True):
-                    if dia.month != mes:
-                        st.caption(f"{dia.day}")
-                        continue
-                    st.markdown(f"**{dia.day}**")
-                    chips = sorted(por_dia.get(dia, []), key=lambda o: o.preco)
-                    baratos = _mais_baratos_do_dia(chips)
-                    for o in chips:
-                        estrela = "★ " if id(o) in baratos else ""
-                        hora = f" · {o.partida:%H:%M}" if o.partida else ""
-                        st.checkbox(f"{estrela}**{o.origem}→{o.destino}**  \n{brl(o.preco)}{hora}",
-                                    key=f"sim_{o.rota_id}_{dia.isoformat()}")
+    # voo escolhido em cada marcação (padrão: o mais barato do dia)
+    def opcoes_do_dia(r: str, d: date) -> list:
+        return sorted(voos.get(r, {}).get(d) or [op[r][d]], key=lambda o: o.preco)
 
     escolhidos = []
-    for k, marcado in st.session_state.items():
-        if str(k).startswith("sim_") and not str(k).startswith("sim_voo_") and marcado:
-            r, d = str(k)[4:].rsplit("_", 1)
-            d = date.fromisoformat(d)
-            if r in op and d in op[r]:
-                escolhidos.append((r, d))
+    for x in marcados:
+        r, d = x.split("|")[0], date.fromisoformat(x.split("|")[1])
+        lista_o = opcoes_do_dia(r, d)
+        i = st.session_state.get(f"sim_voo_{x}", 0)
+        escolhidos.append((x, r, d, lista_o, lista_o[min(i, len(lista_o) - 1)]))
+    escolhidos.sort(key=lambda e: (e[4].partida or datetime.combine(e[2], datetime.min.time())))
+    com_hora = [e[4] for e in escolhidos if e[4].partida and e[4].chegada]
+    cen = Cenario(com_hora) if com_hora else None
+
+    c1, c2 = st.columns([4, 1])
+    with c1:
+        meses = sorted({(d.year, d.month) for dias in op.values() for d in dias})
+        meses_sel = filtro_meses(meses, "sim_meses")
+    with c2:
+        st.write("")
+        if st.button("🧹 Limpar seleção"):
+            st.session_state["sim_marcados"] = []
+            for k in [k for k in st.session_state if str(k).startswith("sim_voo_")]:
+                del st.session_state[k]
+            st.rerun()
+    html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
+                       + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True)
+                       for a, m in meses_sel)
+    novos = calendario_clicavel(html_cal, marcados, "sim_cal")
+    if sorted(novos) != sorted(marcados):
+        st.session_state["sim_marcados"] = novos
+        st.rerun()
+
     st.subheader("Sua viagem simulada")
     if not escolhidos:
-        st.info("Marque passagens no calendário acima.")
+        st.info("Clique nos voos do calendário acima para montar a viagem.")
         return
-    trechos = []
-    for r, d in escolhidos:
-        opcoes_dia = [o for o in voos.get(r, {}).get(d, [op[r][d]])] or [op[r][d]]
-        trechos.append((r, d, sorted(opcoes_dia, key=lambda o: o.preco)))
-    trechos.sort(key=lambda t: (t[2][0].partida or datetime.combine(t[1], datetime.min.time())))
     total, anterior, problemas = 0.0, None, 0
-    for r, d, opcoes_dia in trechos:
+    for x, r, d, lista_o, _ in escolhidos:
         with st.container(border=True):
             fmt = lambda o: (f"sai {o.partida:%d/%m %H:%M} · chega {o.chegada:%d/%m %H:%M} · " if o.partida and o.chegada else "") + \
                 f"{brl(o.preco)} · {NOMES_FONTES.get(o.fonte, o.fonte)}" + (f" ({o.vendedor})" if o.vendedor else "")
-            st.markdown(f"✈️ **{opcoes_dia[0].origem} → {opcoes_dia[0].destino}** · {nomes.get(r, r)} · {d:%d/%m/%Y}")
-            o = st.selectbox("Voo", opcoes_dia, format_func=fmt, key=f"sim_voo_{r}_{d.isoformat()}",
+            st.markdown(f"✈️ **{lista_o[0].origem} → {lista_o[0].destino}** · {nomes.get(r, r)} · {d:%d/%m/%Y}")
+            i = st.selectbox("Voo", range(len(lista_o)), format_func=lambda i: fmt(lista_o[i]), key=f"sim_voo_{x}",
                              help="Todos os voos guardados desse dia (o mais barato vem primeiro).")
+            o = lista_o[i]
             if o.link:
                 st.markdown(f"[abrir no site]({o.link})")
             if anterior and anterior.chegada and o.partida:
@@ -798,7 +876,7 @@ def tela_calendario() -> None:
     lista = viagens()
     nomes = {v["id"]: nome_viagem(v) for v in lista}
     op, voos = dados_atuais(df, lista)
-    rotas = _rotas_obj(lista)
+    rotas = [r for r in _rotas_obj(lista) if r.ativa]
     rotas_lig = {r.id: r for r in rotas}
     ids = [v["id"] for v in lista if v["id"] in op]
     if not ids:
@@ -866,7 +944,7 @@ def tela_calendario() -> None:
     if not meses:
         st.info("Escolha ao menos uma viagem.")
         return
-    for ano, mes in meses:
+    for ano, mes in filtro_meses(meses, "cal_meses"):
         st.markdown(f"#### {MESES[mes - 1].capitalize()} de {ano}")
         st.markdown(calendario_html(ano, mes, op, sel, cen, nomes, voos, rotas_lig), unsafe_allow_html=True)
     if cen:
@@ -878,10 +956,10 @@ def campo_intervalo(chave: str, min_h: float, max_h: float | None) -> tuple[floa
     def em_dias(h: float) -> bool:
         return h >= 24 and h % 24 == 0
     c1, c2, c3, c4 = st.columns([2, 1, 2, 1])
-    vmin = c1.number_input("No mínimo", 0, 9999, int(min_h // 24 if em_dias(min_h) else min_h), key=chave + "_min")
+    vmin = c1.number_input("No mínimo", 0, 9999, _limitar(min_h // 24 if em_dias(min_h) else min_h, 0, 9999), key=chave + "_min")
     umin = c2.radio("em", ["horas", "dias"], index=1 if em_dias(min_h) else 0, key=chave + "_umin", horizontal=False)
     vmax = c3.number_input("No máximo (0 = sem limite)", 0, 9999,
-                           int((max_h // 24 if em_dias(max_h) else max_h) if max_h else 0), key=chave + "_max")
+                           _limitar((max_h // 24 if em_dias(max_h) else max_h) if max_h else 0, 0, 9999), key=chave + "_max")
     umax = c4.radio("em ", ["horas", "dias"], index=1 if (max_h and em_dias(max_h)) else 0, key=chave + "_umax",
                     horizontal=False)
     mn = float(vmin) * (24 if umin == "dias" else 1)
@@ -1143,11 +1221,12 @@ def tela_testar() -> None:
         st.info("Cadastre uma viagem primeiro.")
         return
     ids = [v["id"] for v in lista]
-    pedido = st.session_state.pop("testar_id", None)
-    sel = st.selectbox("Viagem", ids, index=ids.index(pedido) if pedido in ids else 0,
+    if st.session_state.get("testar_sel") not in ids:
+        st.session_state["testar_sel"] = ids[0]
+    sel = st.selectbox("Viagem", ids, key="testar_sel",
                        format_func=lambda i: nome_viagem(next(v for v in lista if v["id"] == i)))
     v = next(x for x in lista if x["id"] == sel)
-    fontes = st.multiselect("Fontes", v.get("fontes") or [], default=v.get("fontes") or [],
+    fontes = st.multiselect("Fontes", v.get("fontes") or [], default=v.get("fontes") or [], key=f"testar_fontes_{sel}",
                             format_func=lambda f: NOMES_FONTES.get(f, f))
     try:
         n = len(consultas(v))

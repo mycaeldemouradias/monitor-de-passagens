@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<!-- Calendário clicável do simulador: mostra o mesmo HTML do calendário do painel e devolve ao
+     Streamlit a lista de voos marcados (protocolo de componentes do Streamlit, sem bibliotecas). -->
+<style>
+  body { margin: 0; font-family: "Source Sans Pro", "Source Sans 3", system-ui, sans-serif; background: transparent; }
+  h4 { margin: 18px 0 8px; font-size: 1.15rem; color: var(--titulo, #fafafa); }
+  .cal .chip[data-id] { cursor: pointer; }
+  .cal .chip[data-id]:hover { outline: 2px solid #60a5fa; }
+  .cal .chip.sel { background: #1d4ed8 !important; color: #fff !important; border: none !important; }
+</style>
+</head>
+<body>
+<div id="raiz" style="display:flow-root"></div>
+<script>
+  function enviar(tipo, dados) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: tipo }, dados || {}), "*");
+  }
+  let selecionados = new Set();
+  function marcar() {
+    document.querySelectorAll("[data-id]").forEach(el => el.classList.toggle("sel", selecionados.has(el.dataset.id)));
+  }
+  // mede o conteúdo (e não a janela): medir a janela fazia a altura crescer sem parar
+  let ultimaAltura = 0;
+  function altura() {
+    const h = Math.ceil(document.getElementById("raiz").getBoundingClientRect().height) + 8;
+    if (Math.abs(h - ultimaAltura) > 1) { ultimaAltura = h; enviar("streamlit:setFrameHeight", { height: h }); }
+  }
+  window.addEventListener("message", ev => {
+    if (!ev.data || ev.data.type !== "streamlit:render") return;
+    const a = ev.data.args;
+    document.documentElement.style.setProperty("--titulo", a.cor_titulo || "#fafafa");
+    document.getElementById("raiz").innerHTML = a.html;
+    selecionados = new Set(a.selecionados || []);
+    marcar();
+    document.querySelectorAll("[data-id]").forEach(el => {
+      el.onclick = () => {
+        const id = el.dataset.id;
+        selecionados.has(id) ? selecionados.delete(id) : selecionados.add(id);
+        marcar();
+        enviar("streamlit:setComponentValue", { value: Array.from(selecionados), dataType: "json" });
+      };
+    });
+    altura();
+  });
+  window.addEventListener("resize", () => { ultimaAltura = 0; altura(); });
+  enviar("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>
