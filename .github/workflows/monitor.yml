@@ -11,6 +11,10 @@ on:
         description: "Só simular (não notifica nem grava histórico)"
         type: boolean
         default: false
+      fontes:
+        description: "Só estas fontes (separadas por espaço; vazio = todas). Ex.: skiplagged"
+        type: string
+        default: ""
 
 permissions:
   contents: write   # para salvar o histórico de preços de volta no repositório
@@ -59,10 +63,12 @@ jobs:
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
         run: |
+          extra=""
+          if [ -n "${{ inputs.fontes }}" ]; then extra="--fontes ${{ inputs.fontes }}"; fi
           if [ "${{ inputs.simular }}" = "true" ]; then
-            python -m monitor --simular
+            python -m monitor --simular $extra
           else
-            python -m monitor
+            python -m monitor $extra
           fi
 
       - name: Salvar histórico no repositório (criptografado)

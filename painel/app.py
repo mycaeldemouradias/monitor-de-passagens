@@ -790,6 +790,17 @@ def tela_publicar() -> None:
             ok, msg = baixar_novidades()
         (st.success if ok else st.error)(msg if ok else "Não consegui baixar. Mostre isto ao Claude:\n\n" + msg)
 
+    st.subheader("Buscar agora no GitHub")
+    st.caption("Não precisa esperar a próxima rodada automática (a cada 2h). Os preços entram no histórico e, "
+               "se baterem as regras, chega aviso no Telegram. Depois de ~10 min, use ⬇️ Baixar preços novos.")
+    so_sk = st.toggle("Só Skiplagged (não gasta a cota do Google)", value=True)
+    if st.button("▶️ Buscar agora"):
+        args = ["gh", "workflow", "run", "monitor.yml", "--repo", REPO]
+        if so_sk:
+            args += ["-f", "fontes=skiplagged"]
+        ok, saida = _cmd(*args, timeout=30)
+        (st.success if ok else st.error)("Pedido enviado. Acompanhe abaixo em Últimas execuções." if ok else saida)
+
     st.subheader("Últimas execuções no GitHub")
     runs = execucoes()
     if not runs:
