@@ -22,7 +22,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 
 from monitor.aeroportos import mesma_cidade, rotulo, todos as aeroportos  # noqa: E402
-from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, ler_pausas  # noqa: E402
+from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, intervalo_min, ler_pausas  # noqa: E402
 from monitor.models import DIAS  # noqa: E402
 from monitor.regras import brl  # noqa: E402
 from monitor.roteiro import Cenario, conflito, opcoes  # noqa: E402
@@ -44,7 +44,7 @@ FONTES_BLOQUEADAS = {"latam": "LATAM", "gol": "Gol", "azul": "Azul", "decolar": 
                      "skyscanner": "Skyscanner"}
 NOMES_FONTES = {k: v[0] for k, v in FONTES_OK.items()} | FONTES_BLOQUEADAS
 #: em quantos computadores do GitHub o Skiplagged roda por rodada (matriz do workflow)
-PARTES_SKIPLAGGED = 4
+PARTES_SKIPLAGGED = 6
 
 
 # ----------------------------------------------------------------- utilidades
@@ -121,7 +121,7 @@ def frequencia(lista: list[dict], g: Geral) -> dict[str, str]:
         if f == "google_flights":
             vezes = min(24 / g.google_flights_a_cada_horas, (g.orcamento_serpapi_mes / 30) / n)
         elif f == "skiplagged":
-            # 4 computadores por rodada (ver .github/workflows/monitor.yml), até N datas cada
+            # 6 computadores por rodada + repescagem (ver .github/workflows/monitor.yml), até N datas cada
             vezes = rodadas * min(1, PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada / n)
         else:
             vezes = rodadas
@@ -305,7 +305,7 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
     int_min = int_max = None
     if depois_de:
         st.caption("Intervalo entre a **chegada** daquela viagem e a **saída** desta:")
-        int_min, int_max = campo_intervalo(k + "_int", float(v.get("intervalo_min_horas") or 3),
+        int_min, int_max = campo_intervalo(k + "_int", intervalo_min(v),
                                            float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None)
 
     ids = {x["id"] for x in lista if x.get("id") != v.get("id")}
@@ -457,7 +457,7 @@ def tela_viagens() -> None:
                     deps = v["depois_de"] if isinstance(v["depois_de"], list) else [v["depois_de"]]
                     quais = " ou ".join(next((nome_viagem(x) for x in lista if x["id"] == d), d) for d in deps)
                     st.caption(f"🔗 Depois de **{quais}**, com "
-                               + _intervalo_txt(float(v.get("intervalo_min_horas") or 3),
+                               + _intervalo_txt(intervalo_min(v),
                                                 float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None))
                 mostrar_precos(df, v["id"])
             with c2:

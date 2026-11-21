@@ -68,6 +68,12 @@ def expandir_datas(spec: Any) -> list[date]:
     return [_parse_data(spec)]
 
 
+def intervalo_min(v: dict[str, Any]) -> float:
+    """Intervalo mínimo da ligação em horas. 0 vale (pode seguir logo); vazio = 3h."""
+    x = v.get("intervalo_min_horas")
+    return 3.0 if x is None or x == "" else float(x)
+
+
 def _lista_ids(valor: Any) -> list[str]:
     """depois_de: "a" ou ["a", "b"] → ["a", "b"]."""
     if not valor:
@@ -99,7 +105,7 @@ def _rota(bruta: dict[str, Any], geral: Geral) -> Rota:
         ativa=bool(bruta.get("ativa", True)),
         nome=str(bruta.get("nome") or ""),
         depois_de=_lista_ids(bruta.get("depois_de")),
-        intervalo_min_horas=float(bruta.get("intervalo_min_horas") or 3),
+        intervalo_min_horas=intervalo_min(bruta),
         intervalo_max_horas=float(bruta["intervalo_max_horas"]) if bruta.get("intervalo_max_horas") else None,
     )
 

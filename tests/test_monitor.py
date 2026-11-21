@@ -657,3 +657,34 @@ def test_ligacao_qualquer_uma_destas_com_minimo_e_maximo(tmp_path):
     assert any("não existe" in e for e in validar([{**base, "id": "x", "depois_de": ["z"]}]))
     assert any("máximo é menor" in e for e in validar([{**base, "id": "z"}, {**base, "id": "x", "depois_de": "z",
                                                        "intervalo_min_horas": 48, "intervalo_max_horas": 24}]))
+
+
+def test_repescagem_busca_so_o_que_faltou(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("MONITOR_CHAVE", Fernet.generate_key().decode())
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("geral: {resumo_diario_hora: null}\nrotas:\n  - {id: r, origem: REC, destino: GRU, "
+                     "ida: {de: '2099-01-10', ate: '2099-01-13'}, fontes: [skiplagged]}\n", encoding="utf-8")
+    from monitor.fontes import FonteBloqueada
+    buscadas, bloquear = [], {"sim": True}
+
+    class Falsa:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c):
+            if bloquear["sim"] and c.ida.day in (12, 13):
+                raise FonteBloqueada("403")
+            buscadas.append(c.ida.day)
+            return [Oferta(c, "skiplagged", 100.0)]
+        def fechar(self): pass
+
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Falsa())
+    base = ["--config", str(rotas), "--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")]
+    (tmp_path / "feitas").mkdir()
+    for i in (1, 2):  # parte 2 (dias 11 e 13) e parte 1 (10 e 12): 12 e 13 bloqueados
+        cli.main(base + ["--parte", f"{i}/2", "--salvar-ofertas", str(tmp_path / "feitas" / f"parte-{i}.cripto")])
+    assert sorted(buscadas) == [10, 11]
+    bloquear["sim"] = False
+    cli.main(base + ["--so-faltantes", str(tmp_path / "feitas"), "--salvar-ofertas", str(tmp_path / "r.cripto")])
+    assert sorted(buscadas) == [10, 11, 12, 13]  # a repescagem fez só 12 e 13

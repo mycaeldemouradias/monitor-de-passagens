@@ -111,6 +111,16 @@ def executar(args: argparse.Namespace) -> int:
             if (args.fontes and fonte not in args.fontes) or fonte in (args.excluir_fontes or []):
                 continue
             consultas_por_fonte[fonte].extend(consultas_da_rota(rota, cfg.geral.moeda))
+    if args.so_faltantes:
+        # repescagem: só as buscas que nenhum computador conseguiu fazer (ex.: um deles foi bloqueado)
+        feitas = set()
+        for arq in sorted(Path(args.so_faltantes).glob("*.cripto")):
+            if not arq.name.startswith("._"):
+                feitas |= set(_ler_parte(arq).get("feitas") or [])
+        consultas_por_fonte = defaultdict(list, {f: [c for c in cs if f"{c.chave}|{f}" not in feitas]
+                                                 for f, cs in consultas_por_fonte.items()})
+        consultas_por_fonte = defaultdict(list, {f: cs for f, cs in consultas_por_fonte.items() if cs})
+        log.info("Repescagem: %d busca(s) ficaram faltando.", sum(len(cs) for cs in consultas_por_fonte.values()))
     if args.parte:
         # --parte 2/4: este computador faz só 1 de cada 4 buscas (as outras vão para outros computadores)
         i, n = (int(x) for x in args.parte.split("/"))
@@ -126,6 +136,7 @@ def executar(args: argparse.Namespace) -> int:
     ofertas: list[Oferta] = []
     #: todos os voos de cada busca ("chave|fonte" → ofertas), para os roteiros e o encaixe entre viagens
     achadas_por_busca: dict[str, list[Oferta]] = {}
+    feitas: set[str] = set()  # "chave|fonte" das buscas concluídas (com ou sem preço)
     resumo: dict[str, dict[str, int]] = {}
     tentativas = falhas = 0
     # resultados das partes que rodaram em outros computadores do GitHub
@@ -211,6 +222,7 @@ def executar(args: argparse.Namespace) -> int:
                     r["falhas"] += 1
                     log.error("Erro em %s para %s: %s", nome_fonte, desc, _erro_curto(e) if privado() else e)
                     continue
+                feitas.add(f"{c.chave}|{nome_fonte}")
                 if not args.simular:
                     estado.marcar_consulta(nome_fonte, c.chave, inicio)
                 if achadas:
@@ -229,7 +241,7 @@ def executar(args: argparse.Namespace) -> int:
             fonte.fechar()
 
     if args.salvar_ofertas:
-        _salvar_parte(Path(args.salvar_ofertas), ofertas, resumo, tentativas, falhas, achadas_por_busca)
+        _salvar_parte(Path(args.salvar_ofertas), ofertas, resumo, tentativas, falhas, achadas_por_busca, feitas)
         log.info("Parte salva: %d preço(s), %d falha(s) em %d busca(s).", len(ofertas), falhas, tentativas)
         return 0
 
@@ -309,12 +321,13 @@ def _voos_atuais(arq_csv: Path, arq_voos: Path, ofertas: list[Oferta], achadas: 
 
 
 def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int,
-                  voos: dict[str, list[Oferta]] | None = None) -> None:
+                  voos: dict[str, list[Oferta]] | None = None, feitas: set[str] | None = None) -> None:
     """Resultado de uma parte, criptografado (os artefatos do GitHub ficam visíveis num repositório público)."""
     from .cofre import _fernet
     bruto = json.dumps({"ofertas": [oferta_para_dict(o) for o in ofertas], "resumo": resumo,
                         "tentativas": tentativas, "falhas": falhas,
-                        "voos": {k: [oferta_para_dict(o) for o in v] for k, v in (voos or {}).items()}},
+                        "voos": {k: [oferta_para_dict(o) for o in v] for k, v in (voos or {}).items()},
+                        "feitas": sorted(feitas or [])},
                        ensure_ascii=False)
     arq.write_bytes(_fernet().encrypt(bruto.encode("utf-8")))
 
@@ -365,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--parte", help="I/N: faz só a parte I de N das buscas (para dividir entre computadores)")
     p.add_argument("--salvar-ofertas", help="só busca e salva o resultado (criptografado) neste arquivo")
     p.add_argument("--incluir-ofertas", nargs="*", help="junta resultados salvos por --salvar-ofertas")
+    p.add_argument("--so-faltantes", help="pasta com as partes já feitas: busca só o que ficou faltando")
     p.add_argument("--listar", action="store_true", help="lista as buscas e sai")
     p.add_argument("--testar-notificacao", action="store_true")
     p.add_argument("--precisa-navegador", action="store_true", help=argparse.SUPPRESS)

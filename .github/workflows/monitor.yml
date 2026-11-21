@@ -31,8 +31,9 @@ env:
   MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
 
 jobs:
-  # O Skiplagged roda dividido em 4 computadores ao mesmo tempo (cada um com outro IP): todas as datas
-  # em toda rodada (até 15 por computador = 60 datas), e um bloqueio ocasional afeta só 1/4 das buscas.
+  # O Skiplagged roda dividido em 6 computadores ao mesmo tempo (cada um com outro IP): todas as datas
+  # em toda rodada (até 15 por computador = 90 datas). Se algum for bloqueado, a "repescagem" (mais 2
+  # computadores, outros IPs) busca só as datas que ficaram faltando.
   skiplagged:
     if: ${{ !inputs.fontes || contains(inputs.fontes, 'skiplagged') }}
     runs-on: ubuntu-latest
@@ -40,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parte: [1, 2, 3, 4]
+        parte: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,8 +52,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Abrir o cofre (viagens)
         run: python -m monitor.cofre abrir config
-      - name: Buscar (parte ${{ matrix.parte }} de 4)
-        run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/4 --salvar-ofertas parte-${{ matrix.parte }}.cripto
+      - name: Buscar (parte ${{ matrix.parte }} de 6)
+        run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/6 --salvar-ofertas parte-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
           name: parte-${{ matrix.parte }}
@@ -60,8 +61,45 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
-  monitorar:
+  repescagem:
     needs: skiplagged
+    if: ${{ always() && (!inputs.fontes || contains(inputs.fontes, 'skiplagged')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre (viagens)
+        run: python -m monitor.cofre abrir config
+      - name: Baixar as partes já feitas
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: parte-*
+          path: feitas
+          merge-multiple: true
+      - name: Buscar o que ficou faltando (parte ${{ matrix.parte }} de 2)
+        run: |
+          mkdir -p feitas
+          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/2 --salvar-ofertas repescagem-${{ matrix.parte }}.cripto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-r${{ matrix.parte }}
+          path: repescagem-${{ matrix.parte }}.cripto
+          retention-days: 1
+          if-no-files-found: ignore
+
+  monitorar:
+    needs: [skiplagged, repescagem]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
