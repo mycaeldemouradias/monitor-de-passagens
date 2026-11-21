@@ -24,7 +24,8 @@ from . import notificacao
 from .config import CONFIG_PADRAO, DADOS_PADRAO, SITES_PADRAO, carregar, consultas_da_rota
 from .fontes import FonteBloqueada, criar_fonte
 from .historico import Estado, Historico, agora
-from .models import Consulta, Oferta, Rota
+from .models import Consulta, Oferta, Rota, oferta_de_dict, oferta_para_dict
+from .resumo import deve_mandar_resumo, marcar_resumo, montar_resumo
 from .regras import avaliar, brl, deve_reavisar
 
 log = logging.getLogger("monitor")
@@ -106,9 +107,13 @@ def executar(args: argparse.Namespace) -> int:
     consultas_por_fonte: dict[str, list[Consulta]] = defaultdict(list)
     for rota in rotas.values():
         for fonte in rota.fontes:
-            if args.fontes and fonte not in args.fontes:
+            if (args.fontes and fonte not in args.fontes) or fonte in (args.excluir_fontes or []):
                 continue
             consultas_por_fonte[fonte].extend(consultas_da_rota(rota, cfg.geral.moeda))
+    if args.parte:
+        # --parte 2/4: este computador faz só 1 de cada 4 buscas (as outras vão para outros computadores)
+        i, n = (int(x) for x in args.parte.split("/"))
+        consultas_por_fonte = defaultdict(list, {f: cs[i - 1::n] for f, cs in consultas_por_fonte.items()})
 
     if args.listar:
         for fonte, cs in consultas_por_fonte.items():
@@ -117,13 +122,26 @@ def executar(args: argparse.Namespace) -> int:
                 print("  ", c.descricao())
         return 0
 
-    if not consultas_por_fonte:
-        log.warning("Nenhuma busca a fazer (rotas inativas ou todas as datas já passaram).")
-        return 0
-
     ofertas: list[Oferta] = []
     resumo: dict[str, dict[str, int]] = {}
     tentativas = falhas = 0
+    # resultados das partes que rodaram em outros computadores do GitHub
+    for arq in args.incluir_ofertas or []:
+        parte = _ler_parte(Path(arq))
+        ofertas.extend(parte["ofertas"])
+        tentativas += parte["tentativas"]
+        falhas += parte["falhas"]
+        for f, contagem in parte["resumo"].items():
+            r = resumo.setdefault(f, {"buscas": 0, "com_preco": 0, "falhas": 0, "puladas": 0})
+            for k, v in contagem.items():
+                r[k] = r.get(k, 0) + v
+        if not args.simular:
+            for o in parte["ofertas"]:
+                estado.marcar_consulta(o.fonte, o.consulta.chave, inicio)
+
+    if not consultas_por_fonte and not ofertas:
+        log.warning("Nenhuma busca a fazer (rotas inativas ou todas as datas já passaram).")
+        return 0
 
     for nome_fonte, consultas in consultas_por_fonte.items():
         r = resumo.setdefault(nome_fonte, {"buscas": 0, "com_preco": 0, "falhas": 0, "puladas": 0})
@@ -205,6 +223,11 @@ def executar(args: argparse.Namespace) -> int:
         finally:
             fonte.fechar()
 
+    if args.salvar_ofertas:
+        _salvar_parte(Path(args.salvar_ofertas), ofertas, resumo, tentativas, falhas)
+        log.info("Parte salva: %d preço(s), %d falha(s) em %d busca(s).", len(ofertas), falhas, tentativas)
+        return 0
+
     # melhor preço por busca (entre todas as fontes) → regras de alerta
     melhores: dict[str, Oferta] = {}
     for o in ofertas:
@@ -231,6 +254,11 @@ def executar(args: argparse.Namespace) -> int:
 
     if not args.simular:
         historico.registrar(ofertas, inicio)
+        if deve_mandar_resumo(estado, cfg.geral, inicio):
+            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio)
+            if any(v == "ok" for v in notificacao.enviar(texto).values()):
+                marcar_resumo(estado, inicio)
+                log.info("Resumo diário enviado.")
         estado.salvar()
         (dados / "ultima_execucao.json").write_text(json.dumps({
             "data_hora_utc": inicio.isoformat(), "fontes": resumo,
@@ -242,6 +270,21 @@ def executar(args: argparse.Namespace) -> int:
              len(ofertas), len(alertas), falhas, tentativas)
     # falha o job só se TUDO falhou (o GitHub avisa por e-mail quando o job falha)
     return 1 if tentativas and falhas == tentativas else 0
+
+
+def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int) -> None:
+    """Resultado de uma parte, criptografado (os artefatos do GitHub ficam visíveis num repositório público)."""
+    from .cofre import _fernet
+    bruto = json.dumps({"ofertas": [oferta_para_dict(o) for o in ofertas], "resumo": resumo,
+                        "tentativas": tentativas, "falhas": falhas}, ensure_ascii=False)
+    arq.write_bytes(_fernet().encrypt(bruto.encode("utf-8")))
+
+
+def _ler_parte(arq: Path) -> dict:
+    from .cofre import _fernet
+    d = json.loads(_fernet().decrypt(arq.read_bytes()))
+    d["ofertas"] = [oferta_de_dict(o) for o in d["ofertas"]]
+    return d
 
 
 def _resumo_github(resumo: dict, melhores: dict[str, Oferta], alertas: list) -> None:
@@ -278,6 +321,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rota", nargs="*", help="só estas rotas (ids)")
     p.add_argument("--fontes", nargs="*", help="só estas fontes")
     p.add_argument("--simular", action="store_true", help="não notifica nem grava nada")
+    p.add_argument("--excluir-fontes", nargs="*", help="todas as fontes, menos estas")
+    p.add_argument("--parte", help="I/N: faz só a parte I de N das buscas (para dividir entre computadores)")
+    p.add_argument("--salvar-ofertas", help="só busca e salva o resultado (criptografado) neste arquivo")
+    p.add_argument("--incluir-ofertas", nargs="*", help="junta resultados salvos por --salvar-ofertas")
     p.add_argument("--listar", action="store_true", help="lista as buscas e sai")
     p.add_argument("--testar-notificacao", action="store_true")
     p.add_argument("--precisa-navegador", action="store_true", help=argparse.SUPPRESS)

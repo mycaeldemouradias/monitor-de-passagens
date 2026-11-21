@@ -106,3 +106,41 @@ class Rota:
     queda_pct: float | None = None
     fontes: list[str] = field(default_factory=list)
     ativa: bool = True
+    nome: str = ""  # nome amigável dado no painel
+
+
+def _trecho_dict(t: Trecho | None) -> dict | None:
+    if t is None:
+        return None
+    return {"partida": t.partida.isoformat(), "chegada": t.chegada.isoformat(), "voos": t.voos,
+            "conexoes": [list(c) for c in t.conexoes], "desce_em": t.desce_em}
+
+
+def _trecho_de(d: dict | None) -> Trecho | None:
+    if not d:
+        return None
+    return Trecho(partida=datetime.fromisoformat(d["partida"]), chegada=datetime.fromisoformat(d["chegada"]),
+                  voos=list(d["voos"]), conexoes=[(a, int(m)) for a, m in d["conexoes"]], desce_em=d["desce_em"])
+
+
+def oferta_para_dict(o: Oferta) -> dict:
+    """Para enviar ofertas entre os computadores do GitHub (cada parte do Skiplagged roda em um)."""
+    c = o.consulta
+    return {
+        "consulta": {"rota_id": c.rota_id, "origem": c.origem, "destino": c.destino, "ida": c.ida.isoformat(),
+                     "volta": c.volta.isoformat() if c.volta else None, "adultos": c.adultos,
+                     "cabine": c.cabine, "moeda": c.moeda},
+        "fonte": o.fonte, "preco": o.preco, "moeda": o.moeda, "companhia": o.companhia, "detalhes": o.detalhes,
+        "link": o.link, "ida": _trecho_dict(o.ida), "volta": _trecho_dict(o.volta), "vendedor": o.vendedor,
+        "avisos": o.avisos, "nivel_preco": o.nivel_preco,
+    }
+
+
+def oferta_de_dict(d: dict) -> Oferta:
+    c = dict(d["consulta"])
+    c["ida"] = date.fromisoformat(c["ida"])
+    c["volta"] = date.fromisoformat(c["volta"]) if c["volta"] else None
+    return Oferta(consulta=Consulta(**c), fonte=d["fonte"], preco=float(d["preco"]), moeda=d["moeda"],
+                  companhia=d["companhia"], detalhes=d["detalhes"], link=d["link"], ida=_trecho_de(d["ida"]),
+                  volta=_trecho_de(d["volta"]), vendedor=d["vendedor"], avisos=list(d["avisos"]),
+                  nivel_preco=d["nivel_preco"])

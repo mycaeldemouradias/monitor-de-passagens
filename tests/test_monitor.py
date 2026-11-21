@@ -90,7 +90,7 @@ def test_execucao_ponta_a_ponta(tmp_path, monkeypatch):
     """Roda o fluxo completo com uma fonte falsa (preços de teste, só neste teste)."""
     cfg = tmp_path / "rotas.yaml"
     cfg.write_text("""
-geral: {fontes_padrao: [teste], min_observacoes: 1}
+geral: {fontes_padrao: [teste], min_observacoes: 1, resumo_diario_hora: null}
 rotas:
   - {id: t1, origem: REC, destino: GRU, ida: "2099-01-10", preco_alvo: 500}
 """, encoding="utf-8")
@@ -497,3 +497,60 @@ def test_no_github_bloqueio_nao_pausa_a_fonte(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     cli.main(["--config", str(rotas), "--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")])
     assert Estado(tmp_path / "d").pausada_ate("skiplagged") is None
+
+
+def test_resumo_diario_uma_vez_por_dia_a_partir_da_hora(tmp_path):
+    from monitor.config import Geral
+    from monitor.historico import Estado, Historico
+    from monitor.resumo import deve_mandar_resumo, marcar_resumo, montar_resumo
+
+    g, est = Geral(resumo_diario_hora=7), Estado(tmp_path)
+    seis_recife = datetime(2026, 11, 21, 9, 17, tzinfo=timezone.utc)   # 06:17 em Recife
+    sete_recife = datetime(2026, 11, 21, 10, 17, tzinfo=timezone.utc)  # 07:17 em Recife
+    assert not deve_mandar_resumo(est, g, seis_recife)
+    assert deve_mandar_resumo(est, g, sete_recife)
+    marcar_resumo(est, sete_recife)
+    assert not deve_mandar_resumo(est, g, sete_recife + timedelta(hours=4))
+    assert deve_mandar_resumo(est, g, sete_recife + timedelta(days=1))
+
+    h = Historico(tmp_path)
+    h.registrar([_oferta(700)], sete_recife - timedelta(hours=30))   # ontem
+    h.registrar([_oferta(650)], sete_recife - timedelta(hours=3))    # hoje
+    h.registrar([_oferta(680)], sete_recife - timedelta(hours=1))
+    rota = _rota(id="r", nome="Férias", preco_alvo=500)
+    texto = montar_resumo(h.csv, [rota, _rota(id="outra")], sete_recife)
+    assert "Férias — REC → GRU" in texto and "R$ 650,00" in texto
+    assert "▼ R$ 50,00 vs. ontem (R$ 700,00)" in texto and "abaixo de R$ 500,00" in texto
+    assert "outra" in texto and "sem preço nas últimas 24h" in texto
+
+
+def test_partes_em_varios_computadores_e_juntar(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("MONITOR_CHAVE", Fernet.generate_key().decode())
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("geral: {resumo_diario_hora: null}\nrotas:\n  - {id: r, origem: REC, destino: GRU, "
+                     "ida: {de: '2099-01-10', ate: '2099-01-14'}, fontes: [skiplagged]}\n", encoding="utf-8")
+    buscadas = []
+
+    class Falsa:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c):
+            buscadas.append(c.ida.day)
+            return [Oferta(c, "skiplagged", 100.0 + c.ida.day, ida=None)]
+        def fechar(self): pass
+
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Falsa())
+    base = ["--config", str(rotas), "--sites", str(tmp_path / "x")]
+    for i in (1, 2):
+        assert cli.main(base + ["--dados", str(tmp_path / f"p{i}"), "--parte", f"{i}/2",
+                                "--salvar-ofertas", str(tmp_path / f"parte{i}.cripto")]) == 0
+    assert sorted(buscadas) == [10, 11, 12, 13, 14]  # cada data em 1 só computador
+    assert b"REC" not in (tmp_path / "parte1.cripto").read_bytes()
+    enviados = []
+    monkeypatch.setattr(cli.notificacao, "enviar", lambda t: enviados.append(t) or {})
+    assert cli.main(base + ["--dados", str(tmp_path / "final"), "--fontes", "nenhuma", "--incluir-ofertas",
+                            str(tmp_path / "parte1.cripto"), str(tmp_path / "parte2.cripto")]) == 0
+    linhas = (tmp_path / "final" / "historico_precos.csv").read_text().strip().splitlines()
+    assert len(linhas) == 6 and len(buscadas) == 5

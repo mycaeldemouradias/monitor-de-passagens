@@ -4,6 +4,8 @@
 cd "$(dirname "$0")/.."
 # o app da Mesa roda com um PATH mínimo: inclui o Homebrew (gh, git)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+# limpa os arquivos "._*" que o macOS cria no SSD (exFAT): não são dados, só atrapalham
+find . -name '._*' -type f -delete 2>/dev/null
 PORTA=8501
 URL="http://localhost:$PORTA"
 if ! curl -s "$URL/_stcore/health" | grep -q ok; then

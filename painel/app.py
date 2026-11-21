@@ -42,6 +42,8 @@ FONTES_OK = {
 FONTES_BLOQUEADAS = {"latam": "LATAM", "gol": "Gol", "azul": "Azul", "decolar": "Decolar",
                      "skyscanner": "Skyscanner"}
 NOMES_FONTES = {k: v[0] for k, v in FONTES_OK.items()} | FONTES_BLOQUEADAS
+#: em quantos computadores do GitHub o Skiplagged roda por rodada (matriz do workflow)
+PARTES_SKIPLAGGED = 4
 
 
 # ----------------------------------------------------------------- utilidades
@@ -118,7 +120,8 @@ def frequencia(lista: list[dict], g: Geral) -> dict[str, str]:
         if f == "google_flights":
             vezes = min(24 / g.google_flights_a_cada_horas, (g.orcamento_serpapi_mes / 30) / n)
         elif f == "skiplagged":
-            vezes = rodadas * min(1, g.skiplagged_max_por_rodada / n)
+            # 4 computadores por rodada (ver .github/workflows/monitor.yml), até N datas cada
+            vezes = rodadas * min(1, PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada / n)
         else:
             vezes = rodadas
         if vezes >= 1:
@@ -270,10 +273,13 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
     adultos = c1.number_input("Adultos", 1, 9, value=int(v.get("adultos", 1)), key=k + "_adultos")
     alvo = c2.number_input("Me avise se ficar abaixo de (R$)", 0, 100_000, step=50, key=k + "_alvo",
                            value=int(v.get("preco_alvo") or 0),
-                           help="0 = sem preço-alvo. Os outros avisos (menor já visto e queda) continuam valendo. "
-                                "Na ida e volta, é o preço total.")
+                           help="0 = sem preço-alvo. Os outros avisos (menor já visto e queda) continuam valendo: "
+                                "basta UMA regra para avisar. Na ida e volta, é o preço total.")
     queda = c3.number_input("…ou se cair este % abaixo da média", 5, 80, key=k + "_queda",
                             value=int(v.get("queda_pct") or g.queda_pct_padrao))
+    referencia_preco(v.get("id"))
+    with st.expander("Como funcionam os avisos?"):
+        st.markdown(REGRAS_TEXTO)
     fontes = escolher_fontes(v.get("fontes") or ["google_flights", "skiplagged"], k)
 
     ids = {x["id"] for x in lista if x.get("id") != v.get("id")}
@@ -331,6 +337,44 @@ def alternar_viagem(id_: str, chave: str) -> None:
 
 
 # ----------------------------------------------------------------- telas
+def mostrar_precos(df: pd.DataFrame, id_: str) -> None:
+    """Menor preço das últimas 24h e menor já visto, no cartão da viagem."""
+    d = df[df["rota_id"] == id_] if not df.empty else df
+    if d.empty:
+        st.caption("💰 Ainda sem preço coletado. (Depois das rodadas, use ⬇️ Baixar preços novos em Salvar e publicar.)")
+        return
+    recentes = d[d["coleta"] >= d["coleta"].max() - pd.Timedelta(hours=24)]
+    m, menor = recentes.loc[recentes["preco"].idxmin()], d.loc[d["preco"].idxmin()]
+    onde = NOMES_FONTES.get(m["fonte"], m["fonte"]) + (f" ({m['vendedor']})" if m.get("vendedor") else "")
+    st.markdown(f"💰 **{brl(m['preco'])}** · {descricao_busca(m)} · {onde} — menor preço das últimas 24h")
+    st.caption(f"Menor já visto: {brl(menor['preco'])} ({descricao_busca(menor)}) · última coleta: "
+               f"{d['coleta'].max():%d/%m %H:%M} · {len(d)} preço(s) guardados")
+
+
+REGRAS_TEXTO = (
+    "Você recebe aviso quando **qualquer uma** destas acontecer (é \"ou\", não \"e\"):\n"
+    "1. o preço fica **igual ou abaixo** do valor de aviso (0 = não usar esta regra);\n"
+    "2. aparece o **menor preço já visto** para aquela data (a partir da 3ª leitura);\n"
+    "3. o preço cai **X%** abaixo da média dos últimos 14 dias.\n\n"
+    "O mesmo aviso não se repete por 72h, a não ser que o preço caia mais. **Sem referência de preço?** "
+    "Deixe 0: as regras 2 e 3 avisam sozinhas quando o preço cair. E todo dia, a partir das 7h, chega o "
+    "resumo com o menor preço de cada viagem."
+)
+
+
+def referencia_preco(id_: str | None) -> None:
+    df = historico()
+    if not id_ or df.empty or id_ not in set(df["rota_id"]):
+        st.caption("Referência de preço: aparece aqui depois das primeiras coletas desta viagem.")
+        return
+    d = df[df["rota_id"] == id_]
+    texto = f"Referência: menor preço encontrado até agora **{brl(d['preco'].min())}**"
+    tipicos = d.loc[d["nivel_preco"].str.contains("típico", na=False), "nivel_preco"]
+    if not tipicos.empty:
+        texto += f"; Google Flights: {tipicos.iloc[-1]}"
+    st.caption(texto + ".")
+
+
 def tela_viagens() -> None:
     st.title("✈️ Minhas viagens")
     g = geral()
@@ -355,6 +399,7 @@ def tela_viagens() -> None:
     if not lista:
         st.info("Nenhuma viagem cadastrada ainda.")
 
+    df = historico()
     for v in lista:
         with st.container(border=True):
             c1, c2 = st.columns([5, 2])
@@ -379,6 +424,7 @@ def tela_viagens() -> None:
                                + (" — ⚠️ todas as datas já passaram" if n == 0 else ""))
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"Fontes: {fontes} · ⚠️ {e}")
+                mostrar_precos(df, v["id"])
             with c2:
                 chave = f"tg_viagem_{v['id']}"
                 st.toggle("Ligada", value=bool(v.get("ativa", True)), key=chave,
@@ -402,8 +448,8 @@ def tela_viagens() -> None:
             for f, txt in freq.items():
                 st.markdown(f"- **{NOMES_FONTES.get(f, f)}:** {txt}")
             st.caption("Google Flights: o plano gratuito permite ~8 buscas por dia no total. Quanto mais datas, "
-                       "menos vezes cada uma é atualizada. Skiplagged: até "
-                       f"{g.skiplagged_max_por_rodada} buscas a cada 2h; acima disso, as datas se revezam.")
+                       f"menos vezes cada uma é atualizada. Skiplagged: {PARTES_SKIPLAGGED} computadores a cada 2h, "
+                       f"até {PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada} datas por rodada.")
 
 
 def tela_historico() -> None:
@@ -713,6 +759,16 @@ def tela_testar() -> None:
 REPO = "mycaeldemouradias/monitor-de-passagens"
 
 
+def limpar_auxiliares() -> int:
+    """Apaga os arquivos "._*" que o macOS cria no SSD (exFAT). Não são dados; só atrapalham."""
+    n = 0
+    for p in RAIZ.rglob("._*"):
+        if ".venv" not in p.parts and p.is_file():
+            p.unlink(missing_ok=True)
+            n += 1
+    return n
+
+
 def _cmd(*args: str, timeout: int = 120) -> tuple[bool, str]:
     """Roda git/gh na pasta do projeto. Devolve (deu_certo, saída)."""
     try:
@@ -737,6 +793,7 @@ def baixar_novidades() -> tuple[bool, str]:
     if not ok:
         return False, saida
     abertos = abrir(RAIZ, "dados")
+    limpar_auxiliares()
     st.cache_data.clear()
     return True, f"{len(abertos)} arquivo(s) de dados atualizados."
 
@@ -782,6 +839,7 @@ def tela_publicar() -> None:
     if c1.button("☁️ Publicar no GitHub", type="primary", disabled=not pend,
                  help="Criptografa suas viagens, envia ao GitHub e já baixa os preços novos."):
         with st.spinner("Publicando…"):
+            limpar_auxiliares()
             ok, msg = publicar()
         (st.success if ok else st.error)(msg if ok else "Não consegui publicar. Mostre isto ao Claude:\n\n" + msg)
     if c2.button("⬇️ Baixar preços novos do GitHub",

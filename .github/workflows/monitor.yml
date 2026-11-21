@@ -23,16 +23,48 @@ concurrency:
   group: monitor-passagens
   cancel-in-progress: false
 
+env:
+  PYTHONPATH: src
+  TZ: America/Recife
+  # repositório público: os registros não mostram rotas, datas nem preços
+  MONITOR_PRIVADO: "1"
+  MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
+
 jobs:
+  # O Skiplagged roda dividido em 4 computadores ao mesmo tempo (cada um com outro IP): todas as datas
+  # em toda rodada (até 15 por computador = 60 datas), e um bloqueio ocasional afeta só 1/4 das buscas.
+  skiplagged:
+    if: ${{ !inputs.fontes || contains(inputs.fontes, 'skiplagged') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"  # a mesma versão usada e testada no Mac
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre (viagens)
+        run: python -m monitor.cofre abrir config
+      - name: Buscar (parte ${{ matrix.parte }} de 4)
+        run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/4 --salvar-ofertas parte-${{ matrix.parte }}.cripto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-${{ matrix.parte }}
+          path: parte-${{ matrix.parte }}.cripto   # criptografado: artefatos são visíveis em repositório público
+          retention-days: 1
+          if-no-files-found: ignore
+
   monitorar:
+    needs: skiplagged
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      PYTHONPATH: src
-      TZ: America/Recife
-      # repositório público: os registros não mostram rotas, datas nem preços
-      MONITOR_PRIVADO: "1"
-      MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,21 +87,33 @@ jobs:
             echo "Nenhuma rota ativa usa navegador — pulando."
           fi
 
-      - name: Buscar preços
+      - name: Baixar as partes do Skiplagged
+        uses: actions/download-artifact@v4
+        continue-on-error: true   # rodada sem Skiplagged (ex.: só Google) não tem partes
+        with:
+          pattern: parte-*
+          path: partes
+          merge-multiple: true
+
+      - name: Buscar preços (outras fontes) e juntar tudo
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          FONTES: ${{ inputs.fontes }}
+          SIMULAR: ${{ inputs.simular }}
         run: |
-          extra=""
-          if [ -n "${{ inputs.fontes }}" ]; then extra="--fontes ${{ inputs.fontes }}"; fi
-          if [ "${{ inputs.simular }}" = "true" ]; then
-            python -m monitor --simular $extra
-          else
-            python -m monitor $extra
+          args="--excluir-fontes skiplagged"
+          if [ -n "$FONTES" ]; then
+            resto=$(echo "$FONTES" | tr ' ' '\n' | grep -v '^skiplagged$' | grep -v '^$' | tr '\n' ' ' || true)
+            args="$args --fontes ${resto:-nenhuma}"
           fi
+          partes=$(ls partes/*.cripto 2>/dev/null || true)
+          [ -n "$partes" ] && args="$args --incluir-ofertas $partes"
+          [ "$SIMULAR" = "true" ] && args="$args --simular"
+          python -m monitor $args
 
       - name: Salvar histórico no repositório (criptografado)
         if: always() && inputs.simular != true

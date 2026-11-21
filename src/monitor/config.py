@@ -33,6 +33,7 @@ class Geral:
     reavisar_apos_horas: int = 72
     max_alertas_por_execucao: int = 10
     pausa_navegador_s: float = 4.0
+    resumo_diario_hora: int | None = 7  # hora (Recife) a partir da qual sai o resumo do dia; None = desligado
 
 
 @dataclass
@@ -89,6 +90,7 @@ def _rota(bruta: dict[str, Any], geral: Geral) -> Rota:
         queda_pct=float(bruta["queda_pct"]) if bruta.get("queda_pct") is not None else None,
         fontes=list(bruta.get("fontes") or geral.fontes_padrao),
         ativa=bool(bruta.get("ativa", True)),
+        nome=str(bruta.get("nome") or ""),
     )
 
 
