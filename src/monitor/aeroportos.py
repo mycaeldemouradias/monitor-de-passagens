@@ -110,6 +110,11 @@ def _cidades(caminho: Path = CSV_PADRAO) -> dict[str, str]:
                 if r.get("Código IATA")}
 
 
+def chave_cidade(codigo: str) -> str:
+    """Identifica a cidade do aeroporto (JFK e LGA → a mesma chave)."""
+    return _cidades().get(codigo, codigo)
+
+
 def mesma_cidade(a: str, b: str) -> bool:
     """JFK e LGA (Nova York), CDG e ORY (Paris)…: dá para chegar num e sair do outro."""
     if a == b:

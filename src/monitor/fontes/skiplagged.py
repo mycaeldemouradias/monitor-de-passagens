@@ -29,7 +29,10 @@ from .base import UA, Fonte, FonteBloqueada, cotacao_para_brl
 
 URL = "https://skiplagged.com/api/search.php"
 #: quantas opções (as mais baratas) viram ofertas por busca
-MAX_OFERTAS = 5
+MAX_OFERTAS = 8
+#: além das mais baratas, a mais barata de cada faixa de horário de saída (para montar roteiros que
+#: encaixem: se o voo mais barato do dia sai cedo demais, pode haver outro mais tarde)
+FAIXA_HORAS = 3
 #: quantas vezes pedir de novo quando a resposta vem parcial
 TENTATIVAS_INCOMPLETO = 6  # ~30s: o site demora até achar todos os preços
 
@@ -158,7 +161,14 @@ class Skiplagged(Fonte):
         link = (f"https://skiplagged.com/flights/{c.origem}/{c.destino}/{c.ida.isoformat()}"
                 + (f"/{c.volta.isoformat()}" if c.volta else ""))
         ofertas = []
-        for centavos, voo_id in sorted(achados)[:MAX_OFERTAS]:
+        escolhidos = sorted(achados)[:MAX_OFERTAS]
+        faixas: dict[int, tuple[int, str]] = {}
+        for centavos, voo_id in sorted(achados):
+            t = _trecho(voos.get(voo_id), destinos)
+            if t:
+                faixas.setdefault(t.partida.hour // FAIXA_HORAS, (centavos, voo_id))
+        escolhidos += [x for x in sorted(faixas.values()) if x not in escolhidos]
+        for centavos, voo_id in escolhidos:
             item = por_id.get(voo_id, {})
             ida = _trecho(voos.get(voo_id), destinos)
             volta, avisos, vendedor = None, [], ""

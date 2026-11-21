@@ -107,8 +107,11 @@ class Rota:
     fontes: list[str] = field(default_factory=list)
     ativa: bool = True
     nome: str = ""  # nome amigável dado no painel
-    depois_de: str = ""            # id de outra viagem que tem de terminar antes desta começar
-    intervalo_min_horas: float = 3  # folga mínima entre a chegada daquela e a saída desta
+    #: acontece depois de QUALQUER UMA destas viagens (a que for comprada), com intervalo entre a
+    #: chegada daquela e a saída desta de no mínimo `intervalo_min_horas` e, se houver, no máximo `..._max_`
+    depois_de: list[str] = field(default_factory=list)
+    intervalo_min_horas: float = 3
+    intervalo_max_horas: float | None = None
 
 
 def _trecho_dict(t: Trecho | None) -> dict | None:

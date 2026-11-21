@@ -26,7 +26,7 @@ from .fontes import FonteBloqueada, criar_fonte
 from .historico import Estado, Historico, agora
 from .models import Consulta, Oferta, Rota, oferta_de_dict, oferta_para_dict
 from .resumo import deve_mandar_resumo, marcar_resumo, montar_resumo
-from .roteiro import conflito, opcao_de_oferta, opcoes
+from .roteiro import conflito, gravar_voos, ler_voos, opcao_de_oferta, opcoes, todos_os_voos
 from .regras import avaliar, brl, deve_reavisar
 
 log = logging.getLogger("monitor")
@@ -124,12 +124,15 @@ def executar(args: argparse.Namespace) -> int:
         return 0
 
     ofertas: list[Oferta] = []
+    #: todos os voos de cada busca ("chave|fonte" → ofertas), para os roteiros e o encaixe entre viagens
+    achadas_por_busca: dict[str, list[Oferta]] = {}
     resumo: dict[str, dict[str, int]] = {}
     tentativas = falhas = 0
     # resultados das partes que rodaram em outros computadores do GitHub
     for arq in args.incluir_ofertas or []:
         parte = _ler_parte(Path(arq))
         ofertas.extend(parte["ofertas"])
+        achadas_por_busca.update(parte.get("voos", {}))
         tentativas += parte["tentativas"]
         falhas += parte["falhas"]
         for f, contagem in parte["resumo"].items():
@@ -211,6 +214,7 @@ def executar(args: argparse.Namespace) -> int:
                 if not args.simular:
                     estado.marcar_consulta(nome_fonte, c.chave, inicio)
                 if achadas:
+                    achadas_por_busca[f"{c.chave}|{nome_fonte}"] = achadas
                     r["com_preco"] += 1
                     melhor = min(achadas, key=lambda o: o.preco)
                     ofertas.append(melhor)
@@ -225,7 +229,7 @@ def executar(args: argparse.Namespace) -> int:
             fonte.fechar()
 
     if args.salvar_ofertas:
-        _salvar_parte(Path(args.salvar_ofertas), ofertas, resumo, tentativas, falhas)
+        _salvar_parte(Path(args.salvar_ofertas), ofertas, resumo, tentativas, falhas, achadas_por_busca)
         log.info("Parte salva: %d preço(s), %d falha(s) em %d busca(s).", len(ofertas), falhas, tentativas)
         return 0
 
@@ -244,16 +248,16 @@ def executar(args: argparse.Namespace) -> int:
     alertas.sort(key=lambda x: x[0].preco)
     alertas = alertas[: cfg.geral.max_alertas_por_execucao]
 
-    # viagens ligadas ("depois de"): avisa se o voo não encaixa com a viagem anterior
+    # viagens ligadas ("depois de"): avisa se o voo não encaixa depois de nenhuma das anteriores
     todas = {r.id: r for r in cfg.rotas}
+    nomes = {r.id: r.nome or r.id for r in cfg.rotas}
     if any(todas[o.consulta.rota_id].depois_de for o, _ in alertas if o.consulta.rota_id in todas):
-        op = _opcoes_atuais(historico.csv, ofertas, inicio)
+        voos = _voos_atuais(historico.csv, dados / "voos.json", ofertas, achadas_por_busca, inicio)
         for o, _ in alertas:
             rota = todas.get(o.consulta.rota_id)
             if rota and rota.depois_de:
-                anterior = todas.get(rota.depois_de)
-                aviso = conflito(op.get(rota.depois_de, {}), opcao_de_oferta(o, inicio), rota.intervalo_min_horas,
-                                 (anterior.nome or anterior.id) if anterior else rota.depois_de)
+                aviso = conflito({a: voos.get(a, {}) for a in rota.depois_de}, opcao_de_oferta(o, inicio),
+                                 rota.intervalo_min_horas, rota.intervalo_max_horas, nomes)
                 if aviso:
                     o.avisos.append("🔗 " + aviso)
 
@@ -268,8 +272,10 @@ def executar(args: argparse.Namespace) -> int:
 
     if not args.simular:
         historico.registrar(ofertas, inicio)
+        gravar_voos(dados / "voos.json", achadas_por_busca, inicio)
         if deve_mandar_resumo(estado, cfg.geral, inicio):
-            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio, cfg.rotas)
+            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio, cfg.rotas,
+                                  dados / "voos.json")
             if any(v == "ok" for v in notificacao.enviar(texto).values()):
                 marcar_resumo(estado, inicio)
                 log.info("Resumo diário enviado.")
@@ -286,24 +292,30 @@ def executar(args: argparse.Namespace) -> int:
     return 1 if tentativas and falhas == tentativas else 0
 
 
-def _opcoes_atuais(arq_csv: Path, ofertas: list[Oferta], inicio) -> dict:
-    """Opções por viagem e data: histórico + o que acabou de ser encontrado nesta rodada."""
+def _voos_atuais(arq_csv: Path, arq_voos: Path, ofertas: list[Oferta], achadas: dict[str, list[Oferta]],
+                inicio) -> dict:
+    """Voos por viagem e data: os guardados + os desta rodada (que substituem os antigos da mesma data)."""
     import csv
     linhas = list(csv.DictReader(open(arq_csv, newline="", encoding="utf-8"))) if arq_csv.exists() else []
-    op = opcoes(linhas)
-    for o in ofertas:
-        x = opcao_de_oferta(o, inicio)
-        atual = op.setdefault(x.rota_id, {}).get(x.data)
-        if atual is None or atual.coleta < inicio or x.preco < atual.preco:
-            op[x.rota_id][x.data] = x
-    return op
+    voos = todos_os_voos(opcoes(linhas), ler_voos(arq_voos))
+    novos: dict = {}
+    for lista in achadas.values():
+        for o in lista:
+            x = opcao_de_oferta(o, inicio)
+            novos.setdefault(x.rota_id, {}).setdefault(x.data, []).append(x)
+    for rota, dias in novos.items():
+        voos.setdefault(rota, {}).update(dias)
+    return voos
 
 
-def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int) -> None:
+def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int,
+                  voos: dict[str, list[Oferta]] | None = None) -> None:
     """Resultado de uma parte, criptografado (os artefatos do GitHub ficam visíveis num repositório público)."""
     from .cofre import _fernet
     bruto = json.dumps({"ofertas": [oferta_para_dict(o) for o in ofertas], "resumo": resumo,
-                        "tentativas": tentativas, "falhas": falhas}, ensure_ascii=False)
+                        "tentativas": tentativas, "falhas": falhas,
+                        "voos": {k: [oferta_para_dict(o) for o in v] for k, v in (voos or {}).items()}},
+                       ensure_ascii=False)
     arq.write_bytes(_fernet().encrypt(bruto.encode("utf-8")))
 
 
@@ -311,6 +323,7 @@ def _ler_parte(arq: Path) -> dict:
     from .cofre import _fernet
     d = json.loads(_fernet().decrypt(arq.read_bytes()))
     d["ofertas"] = [oferta_de_dict(o) for o in d["ofertas"]]
+    d["voos"] = {k: [oferta_de_dict(o) for o in v] for k, v in (d.get("voos") or {}).items()}
     return d
 
 

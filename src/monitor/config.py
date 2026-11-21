@@ -68,6 +68,13 @@ def expandir_datas(spec: Any) -> list[date]:
     return [_parse_data(spec)]
 
 
+def _lista_ids(valor: Any) -> list[str]:
+    """depois_de: "a" ou ["a", "b"] → ["a", "b"]."""
+    if not valor:
+        return []
+    return [str(v) for v in (valor if isinstance(valor, list) else [valor]) if v]
+
+
 def _rota(bruta: dict[str, Any], geral: Geral) -> Rota:
     for campo in ("id", "origem", "destino", "ida"):
         if campo not in bruta:
@@ -91,8 +98,9 @@ def _rota(bruta: dict[str, Any], geral: Geral) -> Rota:
         fontes=list(bruta.get("fontes") or geral.fontes_padrao),
         ativa=bool(bruta.get("ativa", True)),
         nome=str(bruta.get("nome") or ""),
-        depois_de=str(bruta.get("depois_de") or ""),
+        depois_de=_lista_ids(bruta.get("depois_de")),
         intervalo_min_horas=float(bruta.get("intervalo_min_horas") or 3),
+        intervalo_max_horas=float(bruta["intervalo_max_horas"]) if bruta.get("intervalo_max_horas") else None,
     )
 
 

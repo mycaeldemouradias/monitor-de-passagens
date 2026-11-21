@@ -15,13 +15,13 @@ from typing import Any
 import yaml
 
 from .aeroportos import existe
-from .config import PAUSAS_NOME, Geral, _rota, consultas_da_rota
+from .config import PAUSAS_NOME, Geral, _lista_ids, _rota, consultas_da_rota
 from .models import Consulta
 
 INICIO_ROTAS = re.compile(r"^rotas:.*$", re.M)
 #: ordem dos campos de cada viagem no arquivo
 ORDEM = ["id", "nome", "ativa", "origem", "destino", "ida", "volta", "duracao_dias",
-         "adultos", "preco_alvo", "queda_pct", "fontes", "depois_de", "intervalo_min_horas"]
+         "adultos", "preco_alvo", "queda_pct", "fontes", "depois_de", "intervalo_min_horas", "intervalo_max_horas"]
 
 
 def _texto_datas(spec: Any) -> Any:
@@ -63,20 +63,17 @@ def validar(viagens: list[dict[str, Any]]) -> list[str]:
     por_id = {str(v.get("id")): v for v in viagens}
     for v in viagens:
         nome = v.get("nome") or v.get("id") or "(sem nome)"
-        antes = v.get("depois_de")
-        if antes:
-            if antes == v.get("id"):
-                erros.append(f"{nome}: não pode ser ligada a ela mesma.")
-            elif antes not in por_id:
-                erros.append(f"{nome}: está ligada a uma viagem que não existe mais ('{antes}').")
-            else:
-                vistos, atual = {v.get("id")}, antes
-                while atual:  # A depois de B depois de A… não pode
-                    if atual in vistos:
-                        erros.append(f"{nome}: as ligações formam um círculo (uma viagem depois dela mesma).")
-                        break
-                    vistos.add(atual)
-                    atual = (por_id.get(atual) or {}).get("depois_de")
+        antes = _lista_ids(v.get("depois_de"))
+        if v.get("id") in antes:
+            erros.append(f"{nome}: não pode ser ligada a ela mesma.")
+        for x in antes:
+            if x not in por_id:
+                erros.append(f"{nome}: está ligada a uma viagem que não existe mais ('{x}').")
+        if _tem_circulo(str(v.get("id")), por_id):
+            erros.append(f"{nome}: as ligações formam um círculo (uma viagem acabaria depois dela mesma).")
+        mx, mn = v.get("intervalo_max_horas"), v.get("intervalo_min_horas")
+        if mx and mn and float(mx) < float(mn):
+            erros.append(f"{nome}: o intervalo máximo é menor que o mínimo.")
         try:
             r = _rota(v, Geral())
         except (ValueError, KeyError, TypeError) as e:
@@ -99,6 +96,19 @@ def validar(viagens: list[dict[str, Any]]) -> list[str]:
         if r.voltas and r.idas and max(r.voltas) < min(r.idas):
             erros.append(f"{nome}: a volta é antes da ida.")
     return erros
+
+
+def _tem_circulo(inicio: str, por_id: dict[str, dict]) -> bool:
+    pilha, vistos = list(_lista_ids((por_id.get(inicio) or {}).get("depois_de"))), set()
+    while pilha:
+        x = pilha.pop()
+        if x == inicio:
+            return True
+        if x in vistos:
+            continue
+        vistos.add(x)
+        pilha += _lista_ids((por_id.get(x) or {}).get("depois_de"))
+    return False
 
 
 def _bloco(v: dict[str, Any]) -> str:

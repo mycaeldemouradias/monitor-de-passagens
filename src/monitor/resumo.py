@@ -14,7 +14,7 @@ from .config import Geral
 from .historico import Estado
 from .models import Rota
 from .regras import brl
-from .roteiro import conflito, melhor_par, opcoes
+from .roteiro import combinar, conflito, ler_voos, opcoes, todos_os_voos
 
 FUSO = ZoneInfo("America/Recife")
 
@@ -35,7 +35,8 @@ def _datas(linha: dict) -> str:
     return ida + (f" → {date.fromisoformat(linha['volta']):%d/%m}" if linha.get("volta") else " (só ida)")
 
 
-def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list[Rota] | None = None) -> str:
+def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list[Rota] | None = None,
+                  arq_voos: Path | None = None) -> str:
     linhas = []
     if arq_csv.exists():
         with open(arq_csv, newline="", encoding="utf-8") as f:
@@ -47,7 +48,9 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list
                 linhas.append(l)
     hoje, ontem = agora - timedelta(hours=24), agora - timedelta(hours=48)
     por_id = {r.id: r for r in (todas or rotas)}
-    op = opcoes(linhas) if any(r.depois_de for r in rotas) else {}
+    voos = todos_os_voos(opcoes(linhas), ler_voos(arq_voos) if arq_voos else {}) \
+        if any(r.depois_de for r in rotas) else {}
+    nomes = {r.id: r.nome or r.id for r in por_id.values()}
     partes = [f"☀️ Resumo das passagens — {agora.astimezone(FUSO):%d/%m}",
               "Menor preço de cada viagem nas últimas 24h:"]
     for rota in rotas:
@@ -71,19 +74,24 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list
             texto += f"\n   menor já visto: {brl(menor)}"
         if rota.preco_alvo:
             texto += f"\n   seu aviso: abaixo de {brl(rota.preco_alvo)}"
-        if rota.depois_de and rota.depois_de in por_id:
-            anterior = por_id[rota.depois_de]
-            nome_ant = anterior.nome or anterior.id
-            par = melhor_par(op.get(anterior.id, {}), op.get(rota.id, {}), rota.intervalo_min_horas)
-            esta = op.get(rota.id, {}).get(date.fromisoformat(m["ida"]))
-            aviso = conflito(op.get(anterior.id, {}), esta, rota.intervalo_min_horas, nome_ant) if esta else ""
+        anteriores = [a for a in rota.depois_de if a in por_id]
+        if anteriores:
+            esta = next((o for o in voos.get(rota.id, {}).get(date.fromisoformat(m["ida"]), [])
+                         if abs(o.preco - m["_preco"]) < 0.01), None)
+            aviso = conflito({a: voos.get(a, {}) for a in anteriores}, esta, rota.intervalo_min_horas,
+                             rota.intervalo_max_horas, nomes) if esta else ""
             if aviso:
-                texto += f"\n   ⚠️ {aviso}"
-            if par:
-                texto += (f"\n   🔗 encaixe mais barato com '{nome_ant}': {par[0].data:%d/%m} + {par[1].data:%d/%m}"
-                          f" = {brl(par[0].preco + par[1].preco)}")
+                texto += f"\n   ⚠️ o mais barato {aviso}"
+            usaveis = lambda r: [o for d in voos.get(r, {}).values() for o in d if o.partida and o.chegada]
+            pares = [c for a in anteriores for c in combinar([usaveis(a), usaveis(rota.id)],
+                                                            [(rota.intervalo_min_horas, rota.intervalo_max_horas)], 1)]
+            if pares:
+                p = min(pares, key=lambda c: c.total)
+                a, b = p.trechos
+                texto += (f"\n   🔗 encaixe mais barato: {nomes.get(a.rota_id)} {a.data:%d/%m} + esta "
+                          f"{b.data:%d/%m} = {brl(p.total)}")
             else:
-                texto += f"\n   🔗 nenhuma data encaixa depois de '{nome_ant}'"
+                texto += f"\n   🔗 nenhuma data encaixa depois de {' ou '.join(nomes.get(a, a) for a in anteriores)}"
         partes.append(texto)
     partes.append("\nDurante o dia, só aviso quando o preço bater uma das suas regras.")
     return "\n".join(partes)

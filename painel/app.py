@@ -25,7 +25,7 @@ from monitor.aeroportos import mesma_cidade, rotulo, todos as aeroportos  # noqa
 from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, ler_pausas  # noqa: E402
 from monitor.models import DIAS  # noqa: E402
 from monitor.regras import brl  # noqa: E402
-from monitor.roteiro import Cenario, cenarios, conflito, opcoes  # noqa: E402
+from monitor.roteiro import Cenario, conflito, opcoes  # noqa: E402
 from monitor.viagens import (consultas, criar_id, ler_viagens, salvar_pausas,  # noqa: E402
                              salvar_viagens)
 
@@ -291,25 +291,22 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
         st.markdown(REGRAS_TEXTO)
     fontes = escolher_fontes(v.get("fontes") or ["google_flights", "skiplagged"], k)
 
-    st.markdown("**🔗 Ligação com outra viagem** (opcional)")
+    st.markdown("**🔗 Ligação com outras viagens** (opcional)")
     outras = [x["id"] for x in lista if x.get("id") != v.get("id")]
     nomes_o = {x["id"]: nome_viagem(x) for x in lista}
-    atual_dep = v.get("depois_de") or ""
-    opc = ["", *outras]
-    depois_de = st.selectbox("Esta viagem acontece depois de…", opc, key=k + "_dep",
-                             index=opc.index(atual_dep) if atual_dep in opc else 0,
-                             format_func=lambda i: "(nenhuma)" if not i else nomes_o.get(i, i),
-                             help="Ex.: Tampa→Minneapolis depois de Rio→Tampa. O monitor avisa quando o voo mais "
-                                  "barato de um dia não respeita o intervalo, e mostra a combinação mais barata que encaixa.")
-    horas = None
+    atuais_dep = v.get("depois_de") or []
+    atuais_dep = [atuais_dep] if isinstance(atuais_dep, str) else atuais_dep
+    depois_de = st.multiselect("Esta viagem acontece depois de **qualquer uma** destas", outras, key=k + "_dep",
+                               default=[x for x in atuais_dep if x in outras], format_func=lambda i: nomes_o.get(i, i),
+                               placeholder="(nenhuma)",
+                               help="Ex.: Rio→Tampa depois de REC→Galeão OU REC→Santos Dumont (vale a que você "
+                                    "comprar). O monitor avisa quando o voo mais barato de um dia não encaixa, e "
+                                    "monta os roteiros possíveis no Calendário.")
+    int_min = int_max = None
     if depois_de:
-        h_atual = float(v.get("intervalo_min_horas") or 3)
-        em_dias = h_atual >= 24 and h_atual % 24 == 0
-        c1, c2 = st.columns(2)
-        valor = c1.number_input("Intervalo mínimo entre a chegada daquela e a saída desta", 1, 999, key=k + "_int",
-                                value=int(h_atual // 24 if em_dias else h_atual))
-        unidade = c2.radio("em", ["horas", "dias"], index=1 if em_dias else 0, horizontal=True, key=k + "_unid")
-        horas = int(valor) * (24 if unidade == "dias" else 1)
+        st.caption("Intervalo entre a **chegada** daquela viagem e a **saída** desta:")
+        int_min, int_max = campo_intervalo(k + "_int", float(v.get("intervalo_min_horas") or 3),
+                                           float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None)
 
     ids = {x["id"] for x in lista if x.get("id") != v.get("id")}
     nova_v = {
@@ -317,7 +314,8 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
         "nome": nome.strip(), "ativa": v.get("ativa", True), "origem": origem, "destino": destino,
         "ida": ida, "volta": volta, "duracao_dias": duracao, "adultos": int(adultos),
         "preco_alvo": int(alvo) or None, "queda_pct": int(queda), "fontes": fontes,
-        "depois_de": depois_de or None, "intervalo_min_horas": horas,
+        "depois_de": depois_de or None, "intervalo_min_horas": int_min if depois_de else None,
+        "intervalo_max_horas": int_max if depois_de else None,
     }
     if ida and (tipo == "Só ida" or volta or duracao):
         try:
@@ -455,10 +453,12 @@ def tela_viagens() -> None:
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"Fontes: {fontes} · ⚠️ {e}")
                 if v.get("depois_de"):
-                    h = float(v.get("intervalo_min_horas") or 3)
-                    intervalo = f"{h / 24:g} dia(s)" if h >= 24 and h % 24 == 0 else f"{h:g}h"
-                    nome_ant = next((nome_viagem(x) for x in lista if x["id"] == v["depois_de"]), v["depois_de"])
-                    st.caption(f"🔗 Depois de **{nome_ant}**, com pelo menos {intervalo} de intervalo")
+                    from monitor.roteiro import _intervalo_txt
+                    deps = v["depois_de"] if isinstance(v["depois_de"], list) else [v["depois_de"]]
+                    quais = " ou ".join(next((nome_viagem(x) for x in lista if x["id"] == d), d) for d in deps)
+                    st.caption(f"🔗 Depois de **{quais}**, com "
+                               + _intervalo_txt(float(v.get("intervalo_min_horas") or 3),
+                                                float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None))
                 mostrar_precos(df, v["id"])
             with c2:
                 chave = f"tg_viagem_{v['id']}"
@@ -501,19 +501,33 @@ def _quando(dt: datetime) -> str:
     return f"{DIAS[dt.weekday()]} {dt:%d/%m %H:%M}"
 
 
+def _mais_baratos_do_dia(chips: list) -> dict:
+    """Para cada voo do dia: motivo de ser o mais barato entre os do mesmo destino ou da mesma origem."""
+    from monitor.aeroportos import chave_cidade
+    motivos: dict = defaultdict(list)
+    for campo, texto in (("destino", "para {}"), ("origem", "saindo de {}")):
+        grupos: dict = defaultdict(list)
+        for o in chips:
+            grupos[chave_cidade(getattr(o, campo))].append(o)
+        for lista in grupos.values():
+            if len(lista) >= 2:  # só faz sentido comparar quando há mais de uma rota
+                m = min(lista, key=lambda o: o.preco)
+                motivos[id(m)].append(texto.format(cidade_curta(getattr(m, campo))))
+    return motivos
+
+
 def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
-                    ligacoes: dict | None = None) -> str:
+                    voos: dict | None = None, rotas_lig: dict | None = None) -> str:
     import calendar
     import html
 
     # onde a pessoa está em cada dia (só quando há um roteiro escolhido)
     local: dict[date, str] = {}
-    voos: dict[date, list[str]] = defaultdict(list)
+    no_roteiro: set = set()
     cores: dict[str, str] = {}
     if cen:
         t = cen.trechos
-        for i, o in enumerate(t):
-            voos[o.partida.date()].append(o.rota_id)
+        no_roteiro = {(o.rota_id, o.data) for o in t}
         for dest, de, ate in cen.estadias():
             d = de.date()
             while d <= ate.date():
@@ -522,8 +536,7 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
         local.setdefault(t[0].partida.date(), cidade_curta(t[0].origem))
         local.setdefault(t[-1].chegada.date(), cidade_curta(t[-1].destino))
         cidades = list(dict.fromkeys(local.values()))
-        # dias de voo: "Tampa → Minneapolis"; dias dentro de um voo longo: "em trânsito"
-        for o in t:
+        for o in t:  # dias de voo: "Tampa → Minneapolis"; dentro de um voo longo: "em trânsito"
             d = o.partida.date()
             while d <= o.chegada.date():
                 if d == o.partida.date():
@@ -535,11 +548,11 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                 d += timedelta(days=1)
         for c in cidades:
             cores[c] = CORES_CIDADES[len(cores) % len(CORES_CIDADES)]
-        for d, nome in local.items():
-            if "→" in nome:  # dia de voo: cor da cidade de chegada
+        for nome in list(local.values()):
+            if "→" in nome:
                 cores.setdefault(nome, cores.get(nome.split(" → ")[1], "#e0e7ff"))
         cores["✈️ em trânsito"] = "#e0e7ff"
-    mais_barato = {r: min(op[r].values(), key=lambda o: o.preco).data for r in sel if op.get(r)}
+    voo_do_roteiro = {(o.rota_id, o.data): o for o in (cen.trechos if cen else [])}
 
     linhas = ['<table class="cal"><tr>' + "".join(f"<th>{d}</th>" for d in DIAS) + "</tr>"]
     for semana in calendar.Calendar(firstweekday=0).monthdatescalendar(ano, mes):
@@ -552,29 +565,34 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
             if not fora and dia in local:
                 marca = "" if local[dia].startswith("✈️") else "📍 "
                 cel.append(f'<div class="loc">{marca}{html.escape(local[dia])}</div>')
-            if not fora:
-                for r in sel:
-                    o = op.get(r, {}).get(dia)
-                    if not o:
-                        continue
-                    classes = "chip" + (" barato" if mais_barato.get(r) == dia else "")
-                    classes += " voo" if r in voos.get(dia, []) else ""
-                    icone = "✈️ " if r in voos.get(dia, []) else ("★ " if mais_barato.get(r) == dia else "")
-                    titulo = f"{nomes.get(r, r)} · {o.fonte}" + (f" · sai {o.partida:%H:%M}" if o.partida else "")
-                    lig = (ligacoes or {}).get(r)
-                    aviso = conflito(op.get(lig[0], {}), o, lig[1], nomes.get(lig[0], lig[0])) if lig else ""
-                    if aviso:
-                        classes += " conflito"
-                        icone = "⚠️ " + icone
-                        titulo += " · ⚠️ " + aviso
-                    titulo = html.escape(titulo)
-                    hora = ""
-                    if o.partida and o.chegada:
-                        dias = (o.chegada.date() - o.partida.date()).days
-                        hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
-                                + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
-                    cel.append(f'<div class="{classes}" title="{titulo}">{icone}{o.origem}→{o.destino} '
-                               f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
+            chips = [] if fora else [o for r in sel if (o := op.get(r, {}).get(dia))]
+            baratos = _mais_baratos_do_dia(chips)
+            for o in sorted(chips, key=lambda o: o.preco):
+                r = o.rota_id
+                no_rot = (r, dia) in no_roteiro
+                if no_rot:  # o voo do roteiro pode não ser o mais barato do dia: mostra o escolhido
+                    o = voo_do_roteiro[(r, dia)]
+                classes = "chip" + (" barato" if id(o) in baratos or baratos.get(id(op[r][dia])) else "")
+                classes += " voo" if no_rot else ""
+                titulo = f"{nomes.get(r, r)} · {o.fonte}" + (f" · {o.vendedor}" if o.vendedor else "")
+                motivo = baratos.get(id(op[r][dia]))
+                if motivo:
+                    titulo += " · mais barato do dia " + " e ".join(motivo)
+                lig = (rotas_lig or {}).get(r)
+                aviso = conflito({a: (voos or {}).get(a, {}) for a in lig.depois_de}, o, lig.intervalo_min_horas,
+                                 lig.intervalo_max_horas, nomes) if lig and lig.depois_de and not no_rot else ""
+                icone = "✈️ " if no_rot else ("★ " if motivo else "")
+                if aviso:
+                    classes += " conflito"
+                    icone = "⚠️ " + icone
+                    titulo += " · ⚠️ o mais barato " + aviso
+                hora = ""
+                if o.partida and o.chegada:
+                    dias = (o.chegada.date() - o.partida.date()).days
+                    hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
+                            + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
+                cel.append(f'<div class="{classes}" title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
+                           f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
             linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
         linhas.append("</tr>")
     linhas.append("</table>")
@@ -583,9 +601,9 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     table.cal th{padding:6px;text-align:left;color:#111827;background:#f3f4f6;border-bottom:2px solid #d1d5db}
     table.cal td{vertical-align:top;height:92px;padding:4px;border:1px solid #d1d5db;color:#111827;background:#ffffff}
     table.cal td.fora{background:#f3f4f6;color:#9ca3af}
-    .cal .hora{font-size:10.5px;opacity:.85;display:block}
     .cal .num{font-weight:600;margin-bottom:2px}
     .cal .loc{font-size:11px;font-weight:600;margin-bottom:2px}
+    .cal .hora{font-size:10.5px;opacity:.85;display:block}
     .cal .chip{color:#111827;background:#f3f4f6;border-radius:6px;padding:2px 4px;margin:2px 0;line-height:1.25;overflow-wrap:anywhere}
     .cal .chip.barato{background:#dcfce7;border:1px solid #16a34a}
     .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
@@ -594,10 +612,43 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     return css + "".join(linhas)
 
 
+def _rotas_obj(lista: list[dict]) -> list:
+    from monitor.config import _rota
+    saida = []
+    for v in lista:
+        try:
+            saida.append(_rota(v, Geral()))
+        except Exception:  # noqa: BLE001
+            pass
+    return saida
+
+
+def _mostrar_cenario(cen: Cenario, nomes: dict) -> None:
+    for a, prox in zip(cen.trechos, cen.trechos[1:] + [None]):
+        onde = NOMES_FONTES.get(a.fonte, a.fonte) + (f" ({a.vendedor})" if a.vendedor else "")
+        st.markdown(f"✈️ **{a.origem} → {a.destino}** ({nomes.get(a.rota_id, a.rota_id)}) · sai {_quando(a.partida)} · "
+                    f"chega {_quando(a.chegada)} · **{brl(a.preco)}** · {onde}"
+                    + (f" · [abrir]({a.link})" if a.link else ""))
+        if prox:
+            horas = (prox.partida - a.chegada).total_seconds() / 3600
+            tempo = f"{horas / 24:.1f} dias".replace(".", ",") if horas >= 24 else f"{horas:.0f}h"
+            st.caption(f"📍 Em {cidade_curta(a.destino)}: de {_quando(a.chegada)} a {_quando(prox.partida)} ({tempo})")
+    st.caption(f"Total: **{brl(cen.total)}**. Preços da última coleta de cada data; podem ter mudado. "
+               "Bilhetes separados: se um voo atrasar, o seguinte não é protegido.")
+
+
+def _escolher_cenario(cs: list[Cenario], chave: str) -> Cenario:
+    def rotulo_c(i: int) -> str:
+        c = cs[i]
+        return f"{i + 1}º · {brl(c.total)} · termina em {cidade_curta(c.trechos[-1].destino)} · " + " | ".join(
+            f"{o.origem}→{o.destino} {o.partida:%d/%m %H:%M}" for o in c.trechos)
+    i = st.radio("Escolha um para ver no calendário", range(len(cs)), format_func=rotulo_c, key=chave)
+    return cs[i]
+
+
 def tela_calendario() -> None:
+    from monitor.roteiro import combinar, ler_voos, roteiros_pelas_ligacoes, todos_os_voos
     st.title("📅 Calendário e roteiros")
-    st.caption("Cada dia mostra as viagens com saída naquele dia e o preço mais recente encontrado. "
-               "★ verde = o dia mais barato daquela viagem.")
     df = historico()
     if df.empty:
         sem_dados()
@@ -605,80 +656,62 @@ def tela_calendario() -> None:
     lista = viagens()
     nomes = {v["id"]: nome_viagem(v) for v in lista}
     op = opcoes(df.to_dict("records"))
-    ligacoes = {v["id"]: (v["depois_de"], float(v.get("intervalo_min_horas") or 3)) for v in lista if v.get("depois_de")}
+    voos = todos_os_voos(op, ler_voos(DADOS / "voos.json"))
+    rotas = _rotas_obj(lista)
+    rotas_lig = {r.id: r for r in rotas}
     ids = [v["id"] for v in lista if v["id"] in op]
     if not ids:
         sem_dados()
         return
-    rotulo_v = lambda i: f"{nomes.get(i, i)} ({next(iter(op[i].values())).origem}→{next(iter(op[i].values())).destino})"
-    sel = st.multiselect("Viagens no calendário", ids, default=ids, format_func=rotulo_v)
 
     cen = None
     with st.container(border=True):
-        st.subheader("🧭 Montar roteiro")
-        st.caption("Escolha os trechos **na ordem da viagem** (ex.: Rio→Tampa, Tampa→Minneapolis, Minneapolis→Lisboa). "
-                   "O painel testa as datas e mostra só as combinações em que um voo sai depois que o anterior "
-                   "chegou, saindo da mesma cidade (JFK e LGA contam como Nova York). Usa o horário do voo mais "
-                   "barato de cada dia; preços sem horário (Kayak) e ida e volta ficam de fora.")
-        so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
-        cadeias = []
-        for v in lista:  # roteiros formados pelas ligações "depois de" (da primeira até a última viagem)
-            if v.get("depois_de") and not any(x.get("depois_de") == v["id"] for x in lista):
-                cadeia, atual = [v["id"]], v
-                while atual and atual.get("depois_de") and atual["depois_de"] not in cadeia:
-                    cadeia.insert(0, atual["depois_de"])
-                    atual = next((x for x in lista if x["id"] == atual["depois_de"]), None)
-                cadeias.append(cadeia)
-        modo = "Escolher os trechos"
-        if cadeias:
-            modo = st.radio("Como montar", ["Pelas ligações que marquei", "Escolher os trechos"], horizontal=True)
-        folgas = None
-        if modo == "Pelas ligações que marquei":
-            cadeia = st.selectbox("Roteiro", cadeias, format_func=lambda c: " → ".join(nomes.get(i, i) for i in c))
-            trechos = [i for i in cadeia if i in so_ida]
-            folgas = [float(next(x for x in lista if x["id"] == i).get("intervalo_min_horas") or 3) for i in trechos[1:]]
-            if len(trechos) < len(cadeia):
-                st.caption("Algumas viagens desse roteiro ainda não têm preço com horário e ficaram de fora.")
-            st.caption("Usa o intervalo mínimo que você marcou em cada ligação.")
+        st.subheader("🧭 Roteiros possíveis")
+        st.caption("Montados pelas **ligações** que você marca em cada viagem (✏️ → 🔗 \"Esta viagem acontece depois "
+                   "de…\"). Cada roteiro escolhe **um voo de cada trecho**, entre todos os voos guardados de cada dia "
+                   "(não só o mais barato), respeitando os intervalos de cada ligação. Os mais baratos aparecem primeiro.")
+        if not any(r.depois_de for r in rotas):
+            st.info("Você ainda não marcou ligações. Exemplo: em **Rio→Tampa**, marque \"depois de REC→Galeão ou "
+                    "REC→Santos Dumont\", com intervalo de 1 a 5 dias. Aí os roteiros aparecem aqui sozinhos.")
         else:
-            trechos = st.multiselect("Trechos, na ordem", so_ida, format_func=rotulo_v, placeholder="Escolha 2 ou mais")
-            if len(trechos) >= 2:
-                st.markdown("**Intervalo mínimo em cada parada** (cada lugar tem o seu)")
-                folgas = []
-                for a, b in zip(trechos, trechos[1:]):
-                    oa = next(iter(op[a].values()))
-                    c1, c2 = st.columns([3, 1])
-                    valor = c1.number_input(f"Em {cidade_curta(oa.destino)}: entre {nomes.get(a, a)} e {nomes.get(b, b)}",
-                                            1, 999, 3, key=f"folga_{a}_{b}")
-                    unidade = c2.radio("em", ["horas", "dias"], horizontal=True, key=f"unid_{a}_{b}")
-                    folgas.append(float(valor) * (24 if unidade == "dias" else 1))
-        min_dias = 0
-        if len(trechos) >= 2:
-            ligado = modo == "Pelas ligações que marquei"
-            cs = cenarios([op[t] for t in trechos], folgas, min_dias, limite=10, mesma=None if ligado else mesma_cidade)
+            cs, sem_voos = roteiros_pelas_ligacoes(rotas, voos, limite=10)
+            if sem_voos:
+                st.caption("Ainda sem voos com horário: " + ", ".join(nomes.get(i, i) for i in sem_voos) +
+                           " (esses caminhos ficam de fora por enquanto).")
+            fins = {cidade_curta(c.trechos[-1].destino) for c in cs}
+            if len(fins) > 1:
+                st.caption("⚠️ Os roteiros terminam em lugares diferentes (" + ", ".join(sorted(fins)) + "): um "
+                           "roteiro com menos trechos parece mais barato. Para comparar de igual para igual, "
+                           "cadastre também a volta de cada lugar (ex.: Paris→Recife) ligada à chegada lá.")
             if not cs:
-                st.warning("Nenhuma combinação de datas encaixa com esses intervalos. Tente diminuir algum "
-                           "intervalo, ou confira se cada trecho sai da cidade onde o anterior chega.")
+                st.warning("Nenhuma combinação de datas e horários respeita os intervalos das ligações.")
             else:
-                def resumo_cen(i: int) -> str:
-                    c = cs[i]
-                    return f"{brl(c.total)} · " + " | ".join(f"{o.origem}→{o.destino} {o.partida:%d/%m}" for o in c.trechos)
-                i = st.radio("Cenários mais baratos (escolha um para ver no calendário)", range(len(cs)),
-                             format_func=resumo_cen)
-                cen = cs[i]
-                for a, prox in zip(cen.trechos, cen.trechos[1:] + [None]):
-                    onde = NOMES_FONTES.get(a.fonte, a.fonte) + (f" ({a.vendedor})" if a.vendedor else "")
-                    st.markdown(f"✈️ **{a.origem} → {a.destino}** · sai {_quando(a.partida)} · chega "
-                                f"{_quando(a.chegada)} · **{brl(a.preco)}** · {onde}"
-                                + (f" · [abrir]({a.link})" if a.link else ""))
-                    if prox:
-                        horas = (prox.partida - a.chegada).total_seconds() / 3600
-                        tempo = f"{horas / 24:.1f} dias".replace(".", ",") if horas >= 24 else f"{horas:.0f}h"
-                        st.caption(f"📍 Em {cidade_curta(a.destino)}: de {_quando(a.chegada)} a "
-                                   f"{_quando(prox.partida)} ({tempo})")
-                st.caption(f"Total do roteiro: **{brl(cen.total)}**. Preços da última coleta de cada data; podem "
-                           "ter mudado. Bilhetes separados: se um voo atrasar, o seguinte não é protegido.")
+                cen = _escolher_cenario(cs, "cen_lig")
+                _mostrar_cenario(cen, nomes)
 
+    with st.expander("Montar um roteiro à mão (sem usar as ligações)"):
+        so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
+        trechos = st.multiselect("Trechos, na ordem da viagem", so_ida, placeholder="Escolha 2 ou mais",
+                                 format_func=lambda i: nomes.get(i, i))
+        if len(trechos) >= 2:
+            intervalos = []
+            for a, b in zip(trechos, trechos[1:]):
+                st.markdown(f"**Entre {nomes.get(a, a)} e {nomes.get(b, b)}**")
+                intervalos.append(campo_intervalo(f"man_{a}_{b}", 3, None))
+            pernas = [[o for d in voos.get(t, {}).values() for o in d if o.partida and o.chegada and o.volta is None]
+                      for t in trechos]
+            cs_m = combinar(pernas, intervalos, limite=10)
+            if not cs_m:
+                st.warning("Nenhuma combinação respeita esses intervalos.")
+            else:
+                cen = _escolher_cenario(cs_m, "cen_man")
+                _mostrar_cenario(cen, nomes)
+
+    st.subheader("Calendário")
+    st.caption("Cada dia mostra as viagens com saída naquele dia e o voo mais barato daquela data. "
+               "**★ verde** = o mais barato do dia entre as rotas para o mesmo destino, ou entre as que saem da "
+               "mesma origem. ⚠️ = esse voo não encaixa nas ligações (passe o mouse para ver o motivo).")
+    sel = st.multiselect("Viagens no calendário", ids, default=ids, format_func=lambda i: nomes.get(i, i))
     meses = sorted({(d.year, d.month) for r in sel for d in op[r]} |
                    ({(o.partida.year, o.partida.month) for o in cen.trechos} if cen else set()))
     if not meses:
@@ -686,11 +719,27 @@ def tela_calendario() -> None:
         return
     inicial = (cen.trechos[0].partida.year, cen.trechos[0].partida.month) if cen else meses[0]
     mes = st.selectbox("Mês", meses, index=meses.index(inicial), format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
-    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes, ligacoes), unsafe_allow_html=True)
-    legenda = "⚠️ = o voo mais barato desse dia não encaixa com a viagem anterior (passe o mouse para ver o motivo)."
+    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes, voos, rotas_lig), unsafe_allow_html=True)
     if cen:
-        legenda = "Azul ✈️ = voo do roteiro escolhido. As cores de fundo mostram em que cidade você estaria. " + legenda
-    st.caption(legenda)
+        st.caption("Azul ✈️ = voos do roteiro escolhido. O fundo mostra em que cidade você estaria em cada dia.")
+
+
+def campo_intervalo(chave: str, min_h: float, max_h: float | None) -> tuple[float, float | None]:
+    """Intervalo mínimo (e máximo opcional) em horas ou dias. Devolve (mín, máx) em horas."""
+    def em_dias(h: float) -> bool:
+        return h >= 24 and h % 24 == 0
+    c1, c2, c3, c4 = st.columns([2, 1, 2, 1])
+    vmin = c1.number_input("No mínimo", 0, 9999, int(min_h // 24 if em_dias(min_h) else min_h), key=chave + "_min")
+    umin = c2.radio("em", ["horas", "dias"], index=1 if em_dias(min_h) else 0, key=chave + "_umin", horizontal=False)
+    vmax = c3.number_input("No máximo (0 = sem limite)", 0, 9999,
+                           int((max_h // 24 if em_dias(max_h) else max_h) if max_h else 0), key=chave + "_max")
+    umax = c4.radio("em ", ["horas", "dias"], index=1 if (max_h and em_dias(max_h)) else 0, key=chave + "_umax",
+                    horizontal=False)
+    mn = float(vmin) * (24 if umin == "dias" else 1)
+    mx = float(vmax) * (24 if umax == "dias" else 1) if vmax else None
+    if mx is not None and mx < mn:
+        st.warning("O máximo está menor que o mínimo.")
+    return mn, mx
 
 
 def tela_historico() -> None:

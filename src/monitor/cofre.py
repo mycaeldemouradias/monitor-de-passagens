@@ -35,8 +35,14 @@ RAIZ = Path(__file__).resolve().parents[2]
 EXT = ".cripto"
 SIMPLES = {
     "config": ["config/rotas.yaml", "config/pausas.yaml"],
-    "dados": ["data/estado.json", "data/ultima_execucao.json"],
+    "dados": ["data/estado.json", "data/ultima_execucao.json", "data/voos.json"],
 }
+#: compactados antes de criptografar (arquivos maiores, que mudam a cada rodada)
+COMPACTAR = {"data/voos.json"}
+
+
+def _nome_cripto(nome: str) -> str:
+    return nome + (".gz" if nome in COMPACTAR else "") + EXT
 HISTORICO = "data/historico_precos.csv"
 PASTA_HISTORICO = "data/historico"
 
@@ -99,8 +105,13 @@ def fechar(raiz: Path = RAIZ, parte: str = "tudo") -> list[str]:
             continue
         for nome in arquivos:
             legivel = raiz / nome
-            if legivel.exists() and _gravar_se_mudou(raiz / (nome + EXT), legivel.read_bytes(), f):
-                mudaram.append(nome + EXT)
+            if not legivel.exists():
+                continue
+            conteudo = legivel.read_bytes()
+            if nome in COMPACTAR:
+                conteudo = gzip.compress(conteudo, mtime=0)
+            if _gravar_se_mudou(raiz / _nome_cripto(nome), conteudo, f):
+                mudaram.append(_nome_cripto(nome))
     hist = raiz / HISTORICO
     if parte in ("dados", "tudo") and hist.exists():
         for dia, texto in _por_dia(hist.read_text(encoding="utf-8")).items():
@@ -119,10 +130,11 @@ def abrir(raiz: Path = RAIZ, parte: str = "tudo") -> list[str]:
         if parte not in (grupo, "tudo"):
             continue
         for nome in arquivos:
-            cripto = raiz / (nome + EXT)
+            cripto = raiz / _nome_cripto(nome)
             if cripto.exists():
                 (raiz / nome).parent.mkdir(parents=True, exist_ok=True)
-                (raiz / nome).write_bytes(_ler(cripto, f))
+                conteudo = _ler(cripto, f)
+                (raiz / nome).write_bytes(gzip.decompress(conteudo) if nome in COMPACTAR else conteudo)
                 abertos.append(nome)
     pasta = raiz / PASTA_HISTORICO
     if parte in ("dados", "tudo") and pasta.exists():
