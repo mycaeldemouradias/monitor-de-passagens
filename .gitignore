@@ -18,3 +18,5 @@ data/historico/*
 !data/historico/*.cripto
 # notas de trabalho (nome, conta, decisões): ficam só no Mac
 CONTEXTO CLAUDE/
+# (de novo no fim: as exceções acima não podem trazer de volta os "._*" do macOS)
+._*
