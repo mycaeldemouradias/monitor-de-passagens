@@ -14,6 +14,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
+from .models import hora_local
+
 
 @dataclass(frozen=True)
 class Opcao:
@@ -40,8 +42,9 @@ class Ligavel(Protocol):  # monitor.models.Rota
 
 
 def _dt(texto: str | None) -> datetime | None:
+    """Horário local do aeroporto, sem fuso (os dados antigos do Skiplagged vieram com fuso)."""
     try:
-        return datetime.fromisoformat(texto) if texto else None
+        return hora_local(datetime.fromisoformat(texto)) if texto else None
     except ValueError:
         return None
 

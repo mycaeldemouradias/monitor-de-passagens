@@ -46,6 +46,12 @@ class Trecho:
     conexoes: list[tuple[str, int]] = field(default_factory=list)  # [(aeroporto, minutos)]
     desce_em: str = ""  # hidden-city: aeroporto onde descer (o bilhete segue além do destino)
 
+    def __post_init__(self) -> None:
+        # sempre o horário local do aeroporto, sem fuso: o Skiplagged manda "…-03:00" e o Google não manda
+        # fuso; misturar os dois quebra as contas ("can't subtract offset-naive and offset-aware")
+        self.partida = hora_local(self.partida)
+        self.chegada = hora_local(self.chegada)
+
     @property
     def escalas(self) -> int:
         return len(self.conexoes)
@@ -70,6 +76,11 @@ class Trecho:
 
 
 DIAS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+
+
+def hora_local(dt: datetime | None) -> datetime | None:
+    """Tira o fuso mantendo o horário de relógio (o horário local que aparece na passagem)."""
+    return dt.replace(tzinfo=None) if dt is not None and dt.tzinfo is not None else dt
 
 
 @dataclass

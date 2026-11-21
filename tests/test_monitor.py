@@ -285,7 +285,7 @@ def test_historico_grava_detalhes_e_migra_csv_antigo(tmp_path):
     import csv
     linhas = list(csv.DictReader(antigo.open(encoding="utf-8")))
     assert list(linhas[0]) == COLUNAS and linhas[0]["preco"] == "500.00"   # linha antiga preservada
-    assert linhas[1]["ida_partida"] == "2027-03-10T02:25-03:00" and linhas[1]["volta_voos"] == "AD 4232"
+    assert linhas[1]["ida_partida"] == "2027-03-10T02:25" and linhas[1]["volta_voos"] == "AD 4232"  # horário local, sem fuso
 
 
 def test_fonte_descansa_depois_de_bloqueio(tmp_path, monkeypatch):
@@ -688,3 +688,26 @@ def test_repescagem_busca_so_o_que_faltou(tmp_path, monkeypatch):
     bloquear["sim"] = False
     cli.main(base + ["--so-faltantes", str(tmp_path / "feitas"), "--salvar-ofertas", str(tmp_path / "r.cripto")])
     assert sorted(buscadas) == [10, 11, 12, 13]  # a repescagem fez só 12 e 13
+
+
+def test_horarios_com_e_sem_fuso_se_misturam(tmp_path):
+    """Skiplagged manda '…-03:00'; Google Flights manda sem fuso. O roteiro precisa juntar os dois."""
+    import json
+
+    from monitor.roteiro import combinar, ler_voos
+
+    def bloco(rota, o, d, fonte, sai, chega):
+        return {"coleta": "2027-01-05T12:00:00+00:00", "rota_id": rota, "origem": o, "destino": d,
+                "ida": sai[:10], "volta": None, "fonte": fonte,
+                "voos": [{"preco": 100, "vendedor": "", "link": "", "partida": sai, "chegada": chega, "escalas": ""}]}
+    arq = tmp_path / "voos.json"
+    arq.write_text(json.dumps({
+        "a|s": bloco("a", "REC", "GIG", "skiplagged", "2027-02-02T22:05:00-03:00", "2027-02-03T01:00:00-03:00"),
+        "b|g": bloco("b", "GIG", "TPA", "google_flights", "2027-02-07T08:20:00", "2027-02-07T20:00:00")}))
+    v = ler_voos(arq)
+    pernas = [[o for l in v["a"].values() for o in l], [o for l in v["b"].values() for o in l]]
+    cs = combinar(pernas, [(3, None)])
+    assert len(cs) == 1 and cs[0].trechos[0].partida.hour == 22  # horário local mantido
+    from monitor.models import Trecho
+    t = Trecho(datetime.fromisoformat("2027-02-02T22:05:00-03:00"), datetime.fromisoformat("2027-02-03T01:00:00"))
+    assert t.partida.tzinfo is None and t.chegada - t.partida == timedelta(hours=2, minutes=55)
