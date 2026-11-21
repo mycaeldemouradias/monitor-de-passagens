@@ -184,6 +184,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read   # o deploy-pages procura a página enviada no passo anterior
       pages: write
       id-token: write
     environment:
