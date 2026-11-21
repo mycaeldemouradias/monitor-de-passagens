@@ -671,6 +671,123 @@ def ligacoes_impossiveis(rotas: list, voos: dict, nomes: dict) -> list[str]:
     return saida
 
 
+def dados_atuais(df: pd.DataFrame, lista: list[dict]) -> tuple[dict, dict]:
+    """Preços (mais barato por data) e voos guardados, só nas datas que as viagens ativas têm AGORA.
+
+    O histórico guarda também datas antigas (de antes de você mudar uma viagem): elas ficam de fora.
+    """
+    from monitor.roteiro import ler_voos, todos_os_voos
+    validas: dict[str, set] = {}
+    for v in lista:
+        if v.get("ativa", True):
+            try:
+                validas[v["id"]] = {c.ida for c in consultas(v)}
+            except Exception:  # noqa: BLE001
+                pass
+    op_todos = opcoes(df.to_dict("records"))
+    op = {r: {d: o for d, o in dias.items() if d in validas.get(r, set())} for r, dias in op_todos.items()}
+    voos = todos_os_voos(op, ler_voos(DADOS / "voos.json"))
+    voos = {r: {d: l for d, l in dias.items() if d in validas.get(r, set())} for r, dias in voos.items()}
+    return {r: d for r, d in op.items() if d}, {r: d for r, d in voos.items() if d}
+
+
+def tela_simulador() -> None:
+    from monitor.aeroportos import mesma_cidade
+    st.title("🧮 Simular viagem")
+    st.caption("Marque no calendário as passagens que você compraria. Abaixo aparecem as rotas na ordem, o valor "
+               "total e se algum voo se sobrepõe a outro. ★ = o mais barato do dia entre as rotas para o mesmo "
+               "destino ou da mesma origem. Nada aqui muda suas viagens nem os avisos.")
+    df = historico()
+    if df.empty:
+        sem_dados()
+        return
+    lista = viagens()
+    nomes = {v["id"]: nome_viagem(v) for v in lista}
+    op, voos = dados_atuais(df, lista)
+    if not op:
+        sem_dados()
+        return
+    if st.button("🧹 Limpar seleção"):
+        for k in [k for k in st.session_state if str(k).startswith("sim_")]:
+            del st.session_state[k]
+        st.rerun()
+
+    import calendar
+    por_dia: dict = defaultdict(list)
+    for r, dias in op.items():
+        for d, o in dias.items():
+            por_dia[d].append(o)
+    meses = sorted({(d.year, d.month) for d in por_dia})
+    for ano, mes in meses:
+        st.markdown(f"#### {MESES[mes - 1].capitalize()} de {ano}")
+        cab = st.columns(7)
+        for c, nome_dia in zip(cab, DIAS):
+            c.markdown(f"**{nome_dia}**")
+        for semana in calendar.Calendar(firstweekday=0).monthdatescalendar(ano, mes):
+            cols = st.columns(7)
+            for c, dia in zip(cols, semana):
+                with c.container(border=True):
+                    if dia.month != mes:
+                        st.caption(f"{dia.day}")
+                        continue
+                    st.markdown(f"**{dia.day}**")
+                    chips = sorted(por_dia.get(dia, []), key=lambda o: o.preco)
+                    baratos = _mais_baratos_do_dia(chips)
+                    for o in chips:
+                        estrela = "★ " if id(o) in baratos else ""
+                        hora = f" · {o.partida:%H:%M}" if o.partida else ""
+                        st.checkbox(f"{estrela}**{o.origem}→{o.destino}**  \n{brl(o.preco)}{hora}",
+                                    key=f"sim_{o.rota_id}_{dia.isoformat()}")
+
+    escolhidos = []
+    for k, marcado in st.session_state.items():
+        if str(k).startswith("sim_") and not str(k).startswith("sim_voo_") and marcado:
+            r, d = str(k)[4:].rsplit("_", 1)
+            d = date.fromisoformat(d)
+            if r in op and d in op[r]:
+                escolhidos.append((r, d))
+    st.subheader("Sua viagem simulada")
+    if not escolhidos:
+        st.info("Marque passagens no calendário acima.")
+        return
+    trechos = []
+    for r, d in escolhidos:
+        opcoes_dia = [o for o in voos.get(r, {}).get(d, [op[r][d]])] or [op[r][d]]
+        trechos.append((r, d, sorted(opcoes_dia, key=lambda o: o.preco)))
+    trechos.sort(key=lambda t: (t[2][0].partida or datetime.combine(t[1], datetime.min.time())))
+    total, anterior, problemas = 0.0, None, 0
+    for r, d, opcoes_dia in trechos:
+        with st.container(border=True):
+            fmt = lambda o: (f"sai {o.partida:%d/%m %H:%M} · chega {o.chegada:%d/%m %H:%M} · " if o.partida and o.chegada else "") + \
+                f"{brl(o.preco)} · {NOMES_FONTES.get(o.fonte, o.fonte)}" + (f" ({o.vendedor})" if o.vendedor else "")
+            st.markdown(f"✈️ **{opcoes_dia[0].origem} → {opcoes_dia[0].destino}** · {nomes.get(r, r)} · {d:%d/%m/%Y}")
+            o = st.selectbox("Voo", opcoes_dia, format_func=fmt, key=f"sim_voo_{r}_{d.isoformat()}",
+                             help="Todos os voos guardados desse dia (o mais barato vem primeiro).")
+            if o.link:
+                st.markdown(f"[abrir no site]({o.link})")
+            if anterior and anterior.chegada and o.partida:
+                horas = (o.partida - anterior.chegada).total_seconds() / 3600
+                if horas < 0:
+                    st.error(f"❌ Sobrepõe: sai {o.partida:%d/%m %H:%M}, antes de o voo anterior chegar "
+                             f"({anterior.chegada:%d/%m %H:%M}).")
+                    problemas += 1
+                else:
+                    tempo = f"{horas / 24:.1f} dias".replace(".", ",") if horas >= 24 else f"{horas:.0f}h"
+                    st.caption(f"⏱️ {tempo} depois da chegada do voo anterior ({cidade_curta(anterior.destino)}).")
+                    if horas < 3:
+                        st.warning("Menos de 3h entre os voos: apertado, principalmente com bilhetes separados.")
+                if not mesma_cidade(anterior.destino, o.origem):
+                    st.warning(f"O voo anterior chega em {cidade_curta(anterior.destino)} e este sai de "
+                               f"{cidade_curta(o.origem)}: você precisa se deslocar entre as cidades.")
+            total += o.preco
+            anterior = o
+    st.metric("Valor total", brl(total), help="Soma dos voos escolhidos (preços da última coleta; podem ter mudado).")
+    if problemas:
+        st.error(f"{problemas} voo(s) se sobrepõem. Troque a data ou o horário marcado em vermelho.")
+    else:
+        st.success("Nenhum voo se sobrepõe.")
+
+
 def tela_calendario() -> None:
     from monitor.roteiro import combinar, ler_voos, roteiros_pelas_ligacoes, todos_os_voos
     st.title("📅 Calendário e roteiros")
@@ -680,8 +797,7 @@ def tela_calendario() -> None:
         return
     lista = viagens()
     nomes = {v["id"]: nome_viagem(v) for v in lista}
-    op = opcoes(df.to_dict("records"))
-    voos = todos_os_voos(op, ler_voos(DADOS / "voos.json"))
+    op, voos = dados_atuais(df, lista)
     rotas = _rotas_obj(lista)
     rotas_lig = {r.id: r for r in rotas}
     ids = [v["id"] for v in lista if v["id"] in op]
@@ -750,9 +866,9 @@ def tela_calendario() -> None:
     if not meses:
         st.info("Escolha ao menos uma viagem.")
         return
-    inicial = (cen.trechos[0].partida.year, cen.trechos[0].partida.month) if cen else meses[0]
-    mes = st.selectbox("Mês", meses, index=meses.index(inicial), format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
-    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes, voos, rotas_lig), unsafe_allow_html=True)
+    for ano, mes in meses:
+        st.markdown(f"#### {MESES[mes - 1].capitalize()} de {ano}")
+        st.markdown(calendario_html(ano, mes, op, sel, cen, nomes, voos, rotas_lig), unsafe_allow_html=True)
     if cen:
         st.caption("Azul ✈️ = voos do roteiro escolhido. O fundo mostra em que cidade você estaria em cada dia.")
 
@@ -1275,6 +1391,7 @@ st.set_page_config(page_title="Monitor de Passagens", page_icon="✈️", layout
 PAGINAS = {
     "viagens": st.Page(tela_viagens, title="Minhas viagens", icon="✈️", default=True),
     "calendario": st.Page(tela_calendario, title="Calendário e roteiros", icon="📅", url_path="calendario"),
+    "simulador": st.Page(tela_simulador, title="Simular viagem", icon="🧮", url_path="simular"),
     "historico": st.Page(tela_historico, title="Preços ao longo do tempo", icon="📈", url_path="historico"),
     "analise": st.Page(tela_analise, title="Melhor dia e horário", icon="🗓️", url_path="analise"),
     "buscas": st.Page(tela_buscas, title="Histórico de buscas", icon="🔎", url_path="buscas"),
