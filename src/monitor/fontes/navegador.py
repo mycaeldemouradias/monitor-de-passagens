@@ -33,6 +33,7 @@ SINAIS_BLOQUEIO = (
     "verifique que você é humano", "confirme que você é humano", "request unsuccessful",
     "acesso negado", "unusual traffic", "press & hold", "pressione e segure",
     "person or a robot", "acesso está temporariamente restrito",  # Skyscanner, Decolar (20/11/2026)
+    "verificação de segurança", "não sou um robô",  # Kayak no GitHub Actions (21/11/2026)
 )
 
 

@@ -38,12 +38,29 @@ class Fonte:
         pass
 
 
+#: serviços de cotação, na ordem de preferência. O AwesomeAPI recusa (HTTP 429) os computadores do
+#: GitHub Actions (visto em 21/11/2026); os outros dois são reservas (cotação diária).
+_COTACOES = (
+    ("AwesomeAPI", "https://economia.awesomeapi.com.br/json/last/{m}-BRL", lambda d, m: d[f"{m}BRL"]["bid"]),
+    ("Frankfurter", "https://api.frankfurter.dev/v1/latest?base={m}&symbols=BRL", lambda d, m: d["rates"]["BRL"]),
+    ("Open ER-API", "https://open.er-api.com/v6/latest/{m}", lambda d, m: d["rates"]["BRL"]),
+)
+
+
 @functools.lru_cache(maxsize=8)
 def cotacao_para_brl(moeda: str) -> float:
-    """Cotação de compra (bid) atual via AwesomeAPI. Usada só quando a fonte não devolve BRL."""
+    """Cotação atual para BRL (1ª fonte que responder). Usada só quando a fonte não devolve BRL."""
     moeda = moeda.upper()
     if moeda == "BRL":
         return 1.0
-    r = requests.get(f"https://economia.awesomeapi.com.br/json/last/{moeda}-BRL", timeout=20)
-    r.raise_for_status()
-    return float(r.json()[f"{moeda}BRL"]["bid"])
+    erros = []
+    for nome, url, extrair in _COTACOES:
+        try:
+            r = requests.get(url.format(m=moeda), timeout=20)
+            r.raise_for_status()
+            valor = float(extrair(r.json(), moeda))
+            if valor > 0:
+                return valor
+        except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+            erros.append(f"{nome}: {type(e).__name__}")
+    raise RuntimeError("Sem cotação do dólar (" + "; ".join(erros) + ")")

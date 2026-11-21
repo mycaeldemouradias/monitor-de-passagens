@@ -453,3 +453,26 @@ def test_modo_privado_nao_mostra_rotas_nem_chaves(tmp_path, monkeypatch, caplog,
     assert "busca 1/1" in texto
     assert "GIG" not in texto and "TPA" not in texto and "chave-super-secreta" not in texto
     assert cli.sem_segredos("token chave-super-secreta-123 aqui") == "token *** aqui"
+
+
+def test_cotacao_usa_reserva_quando_a_primeira_recusa(monkeypatch):
+    import requests
+
+    from monitor.fontes import base
+
+    class Resp:
+        def __init__(self, status, dados): self.status_code, self._d = status, dados
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code}")
+        def json(self): return self._d
+
+    urls = []
+    def falso_get(url, timeout):
+        urls.append(url)
+        return Resp(429, {}) if "awesomeapi" in url else Resp(200, {"rates": {"BRL": 5.9}})
+    monkeypatch.setattr(base.requests, "get", falso_get)
+    base.cotacao_para_brl.cache_clear()
+    assert base.cotacao_para_brl("USD") == 5.9
+    assert base.cotacao_para_brl("USD") == 5.9 and len(urls) == 2  # 2ª vez vem do cache
+    base.cotacao_para_brl.cache_clear()
