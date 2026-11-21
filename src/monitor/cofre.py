@@ -126,7 +126,8 @@ def abrir(raiz: Path = RAIZ, parte: str = "tudo") -> list[str]:
                 abertos.append(nome)
     pasta = raiz / PASTA_HISTORICO
     if parte in ("dados", "tudo") and pasta.exists():
-        dias = sorted(pasta.glob(f"*.csv.gz{EXT}"))
+        # "._*": arquivos auxiliares que o macOS cria em discos exFAT (não são dados)
+        dias = sorted(p for p in pasta.glob(f"*.csv.gz{EXT}") if not p.name.startswith("._"))
         if dias:
             buf = io.StringIO()
             w = csv.DictWriter(buf, fieldnames=COLUNAS, extrasaction="ignore", lineterminator="\n")
