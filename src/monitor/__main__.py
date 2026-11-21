@@ -48,6 +48,12 @@ class _FiltroSegredos(logging.Filter):
         return True
 
 
+def _erro_curto(e: Exception) -> str:
+    """Erro sem endereço nem parâmetros (que podem ter a rota): só o tipo e o código HTTP."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
+
+
 def privado() -> bool:
     """No GitHub (repositório público) os registros não mostram rotas, datas nem preços."""
     return os.getenv("MONITOR_PRIVADO") == "1"
@@ -174,7 +180,7 @@ def executar(args: argparse.Namespace) -> int:
                 except Exception as e:  # noqa: BLE001 — uma busca falhar não para as outras
                     falhas += 1
                     r["falhas"] += 1
-                    log.error("Erro em %s para %s: %s", nome_fonte, desc, type(e).__name__ if privado() else e)
+                    log.error("Erro em %s para %s: %s", nome_fonte, desc, _erro_curto(e) if privado() else e)
                     continue
                 if not args.simular:
                     estado.marcar_consulta(nome_fonte, c.chave, inicio)
