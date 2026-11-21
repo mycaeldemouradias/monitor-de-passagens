@@ -1,0 +1,82 @@
+name: Monitor de passagens
+
+on:
+  schedule:
+    # A cada 2 horas, no minuto 17 (UTC). O GitHub pode atrasar alguns minutos em horários de pico.
+    # O Google Flights roda com menos frequência: veja `google_flights_a_cada_horas` no config/rotas.yaml.
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      simular:
+        description: "Só simular (não notifica nem grava histórico)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # para salvar o histórico de preços de volta no repositório
+
+concurrency:
+  group: monitor-passagens
+  cancel-in-progress: false
+
+jobs:
+  monitorar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: src
+      TZ: America/Recife
+      # repositório público: os registros não mostram rotas, datas nem preços
+      MONITOR_PRIVADO: "1"
+      MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"  # a mesma versão usada e testada no Mac
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Abrir o cofre (viagens e histórico criptografados)
+        run: python -m monitor.cofre abrir tudo
+
+      - name: Instalar Chromium (só se alguma rota usa sites de cias/agências)
+        run: |
+          if python -m monitor --precisa-navegador; then
+            python -m playwright install --with-deps chromium
+          else
+            echo "Nenhuma rota ativa usa navegador — pulando."
+          fi
+
+      - name: Buscar preços
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: |
+          if [ "${{ inputs.simular }}" = "true" ]; then
+            python -m monitor --simular
+          else
+            python -m monitor
+          fi
+
+      - name: Salvar histórico no repositório (criptografado)
+        if: always() && inputs.simular != true
+        run: |
+          python -m monitor.cofre fechar dados
+          git config user.name "monitor-passagens[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # só os .cripto entram: as versões legíveis estão no .gitignore
+          git add data/
+          if git diff --staged --quiet; then
+            echo "Sem mudanças."
+          else
+            git commit -m "dados: execução $(date -u +%Y-%m-%dT%H:%MZ)"
+            git pull --rebase --autostash
+            git push
+          fi

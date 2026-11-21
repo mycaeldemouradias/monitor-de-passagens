@@ -1,0 +1,58 @@
+# =====================================================================
+#  SITES ACESSADOS POR NAVEGADOR (companhias e agências)
+# =====================================================================
+# Cada site tem um modelo de URL de busca. Campos que podem ser usados no modelo:
+#   {origem} {destino}            → REC, GRU
+#   {origem_min} {destino_min}    → rec, gru
+#   {ida} {volta}                 → 2027-03-10
+#   {ida_ddmmaaaa} {volta_ddmmaaaa}   → 10-03-2027
+#   {ida_mmddaaaa} {volta_mmddaaaa}   → 03/10/2027
+#   {ida_aammdd} {volta_aammdd}       → 270310
+#   {adultos}
+#
+# seletor_preco (opcional): seletor CSS dos cards de preço. Sem ele, o monitor pega o
+# menor "R$ ..." visível na página inteira, o que pode capturar valores errados.
+# espera_s: segundos de espera para os resultados carregarem.
+# preco_minimo / preco_maximo: descarta valores fora dessa faixa (ex.: taxas, bagagem).
+#
+# `validado` indica se o formato da URL foi conferido abrindo o link em um navegador.
+# Sites mudam o formato sem aviso: se uma fonte parar de achar preço, abra a URL
+# gerada (aparece no histórico e nos logs) e ajuste aqui.
+
+sites:
+  kayak:
+    # validado em 20/11/2026 no Mac: REC→GRU só ida R$ 365 (conferido no print) e ida e volta R$ 742
+    validado: true
+    url_so_ida: "https://www.kayak.com.br/flights/{origem}-{destino}/{ida}/{adultos}adults?sort=price_a"
+    url_ida_volta: "https://www.kayak.com.br/flights/{origem}-{destino}/{ida}/{volta}/{adultos}adults?sort=price_a"
+    espera_s: 20
+
+  skyscanner:
+    validado: false
+    url_so_ida: "https://www.skyscanner.com.br/transporte/passagens-aereas/{origem_min}/{destino_min}/{ida_aammdd}/?adultsv2={adultos}&cabinclass=economy&rtn=0"
+    url_ida_volta: "https://www.skyscanner.com.br/transporte/passagens-aereas/{origem_min}/{destino_min}/{ida_aammdd}/{volta_aammdd}/?adultsv2={adultos}&cabinclass=economy&rtn=1"
+    espera_s: 20
+
+  decolar:
+    validado: false
+    url_so_ida: "https://www.decolar.com/shop/flights/results/oneway/{origem}/{destino}/{ida}/{adultos}/0/0"
+    url_ida_volta: "https://www.decolar.com/shop/flights/results/roundtrip/{origem}/{destino}/{ida}/{volta}/{adultos}/0/0"
+    espera_s: 20
+
+  latam:
+    validado: false
+    url_so_ida: "https://www.latamairlines.com/br/pt/oferta-voos?origin={origem}&outbound={ida}T12%3A00%3A00.000Z&destination={destino}&inbound=null&adt={adultos}&chd=0&inf=0&trip=OW&cabin=Economy&redemption=false&sort=RECOMMENDED"
+    url_ida_volta: "https://www.latamairlines.com/br/pt/oferta-voos?origin={origem}&outbound={ida}T12%3A00%3A00.000Z&destination={destino}&inbound={volta}T12%3A00%3A00.000Z&adt={adultos}&chd=0&inf=0&trip=RT&cabin=Economy&redemption=false&sort=RECOMMENDED"
+    espera_s: 20
+
+  azul:
+    validado: false
+    url_so_ida: "https://www.voeazul.com.br/br/pt/home/selecao-voo?c[0].ds={origem}&c[0].std={ida_mmddaaaa}&c[0].as={destino}&p[0].t=ADT&p[0].c={adultos}&p[0].cd=&f.dl=3&f.dr=3&cc=BRL"
+    url_ida_volta: "https://www.voeazul.com.br/br/pt/home/selecao-voo?c[0].ds={origem}&c[0].std={ida_mmddaaaa}&c[0].as={destino}&c[1].ds={destino}&c[1].std={volta_mmddaaaa}&c[1].as={origem}&p[0].t=ADT&p[0].c={adultos}&p[0].cd=&f.dl=3&f.dr=3&cc=BRL"
+    espera_s: 20
+
+  gol:
+    validado: false
+    url_so_ida: "https://b2c.voegol.com.br/compra/busca-parceiros?pv=br&tipo=DF&de={origem}&para={destino}&ida={ida_ddmmaaaa}&ADT={adultos}&ADL=0&CHD=0&INF=0"
+    url_ida_volta: "https://b2c.voegol.com.br/compra/busca-parceiros?pv=br&tipo=DF&de={origem}&para={destino}&ida={ida_ddmmaaaa}&volta={volta_ddmmaaaa}&ADT={adultos}&ADL=0&CHD=0&INF=0"
+    espera_s: 20

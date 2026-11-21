@@ -1,0 +1,5 @@
+requests>=2.31
+PyYAML>=6.0
+python-dotenv>=1.0
+playwright>=1.48   # só é usado pelas fontes de navegador (cias e agências)
+cryptography>=43   # criptografia das viagens e do histórico (repositório público)

@@ -1,0 +1,20 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
+._*
+painel/painel.log
+
+# --- repositório público: o que é pessoal só vai criptografado (.cripto) ---
+config/rotas.yaml
+config/pausas.yaml
+data/*
+!data/.gitkeep
+!data/*.cripto
+!data/historico/
+data/historico/*
+!data/historico/*.cripto
+# notas de trabalho (nome, conta, decisões): ficam só no Mac
+CONTEXTO CLAUDE/

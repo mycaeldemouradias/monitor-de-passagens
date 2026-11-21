@@ -1,0 +1,3 @@
+# Só para o painel no Mac (não é usado no GitHub Actions)
+-r requirements.txt
+streamlit>=1.40
