@@ -21,7 +21,7 @@ from .models import Consulta
 INICIO_ROTAS = re.compile(r"^rotas:.*$", re.M)
 #: ordem dos campos de cada viagem no arquivo
 ORDEM = ["id", "nome", "ativa", "origem", "destino", "ida", "volta", "duracao_dias",
-         "adultos", "preco_alvo", "queda_pct", "fontes"]
+         "adultos", "preco_alvo", "queda_pct", "fontes", "depois_de", "intervalo_min_horas"]
 
 
 def _texto_datas(spec: Any) -> Any:
@@ -60,8 +60,23 @@ def validar(viagens: list[dict[str, Any]]) -> list[str]:
     ids = [str(v.get("id", "")) for v in viagens]
     for i in sorted({i for i in ids if ids.count(i) > 1}):
         erros.append(f"Há duas viagens com o mesmo código '{i}'.")
+    por_id = {str(v.get("id")): v for v in viagens}
     for v in viagens:
         nome = v.get("nome") or v.get("id") or "(sem nome)"
+        antes = v.get("depois_de")
+        if antes:
+            if antes == v.get("id"):
+                erros.append(f"{nome}: não pode ser ligada a ela mesma.")
+            elif antes not in por_id:
+                erros.append(f"{nome}: está ligada a uma viagem que não existe mais ('{antes}').")
+            else:
+                vistos, atual = {v.get("id")}, antes
+                while atual:  # A depois de B depois de A… não pode
+                    if atual in vistos:
+                        erros.append(f"{nome}: as ligações formam um círculo (uma viagem depois dela mesma).")
+                        break
+                    vistos.add(atual)
+                    atual = (por_id.get(atual) or {}).get("depois_de")
         try:
             r = _rota(v, Geral())
         except (ValueError, KeyError, TypeError) as e:

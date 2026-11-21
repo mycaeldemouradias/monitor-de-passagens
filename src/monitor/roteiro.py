@@ -77,8 +77,8 @@ class Cenario:
         return [(a.destino, a.chegada, b.partida) for a, b in zip(self.trechos, self.trechos[1:])]
 
 
-def cenarios(sequencia: list[dict[date, Opcao]], folga_h: float = 3, min_dias: int = 0, limite: int = 10,
-             mesma: Callable[[str, str], bool] = mesma_cidade) -> list[Cenario]:
+def cenarios(sequencia: list[dict[date, Opcao]], folga_h: float | list[float] = 3, min_dias: int = 0,
+             limite: int = 10, mesma: Callable[[str, str], bool] | None = mesma_cidade) -> list[Cenario]:
     """Combinações de datas para os trechos em ordem, sem sobreposição, das mais baratas para as mais caras.
 
     Regras: cada trecho sai da cidade onde o anterior chegou; sai pelo menos `folga_h` horas depois da
@@ -89,11 +89,12 @@ def cenarios(sequencia: list[dict[date, Opcao]], folga_h: float = 3, min_dias: i
                if o.partida and o.chegada and o.volta is None] for t in sequencia]
     if not listas or any(not l for l in listas):
         return []
+    folgas = folga_h if isinstance(folga_h, list) else [folga_h] * (len(listas) - 1)
     validos = []
     for combo in product(*listas):
         ok = True
-        for a, b in zip(combo, combo[1:]):
-            if not mesma(a.destino, b.origem) or b.partida < a.chegada + timedelta(hours=folga_h):
+        for (a, b), folga in zip(zip(combo, combo[1:]), folgas):
+            if (mesma and not mesma(a.destino, b.origem)) or b.partida < a.chegada + timedelta(hours=folga):
                 ok = False
                 break
             if min_dias and (b.partida.date() - a.chegada.date()).days < min_dias:
@@ -103,3 +104,39 @@ def cenarios(sequencia: list[dict[date, Opcao]], folga_h: float = 3, min_dias: i
             validos.append(Cenario(list(combo)))
     validos.sort(key=lambda c: (c.total, c.trechos[0].partida))
     return validos[:limite]
+
+
+def encaixa(antes: Opcao, depois: Opcao, folga_h: float) -> bool:
+    """O voo `depois` sai pelo menos `folga_h` horas depois que o voo `antes` chegou?"""
+    if not (antes.chegada and depois.partida):
+        return False
+    return depois.partida >= antes.chegada + timedelta(hours=folga_h)
+
+
+def melhor_par(antes: dict[date, Opcao], depois: dict[date, Opcao], folga_h: float) -> tuple[Opcao, Opcao] | None:
+    """A combinação mais barata (uma data de cada viagem) que respeita o intervalo."""
+    pares = [(a, b) for a in antes.values() for b in depois.values() if encaixa(a, b, folga_h)]
+    return min(pares, key=lambda p: (p[0].preco + p[1].preco, p[1].partida)) if pares else None
+
+
+def conflito(antes: dict[date, Opcao], b: Opcao, folga_h: float, nome_antes: str) -> str:
+    """Aviso quando o voo `b` não encaixa com a viagem anterior ('' se encaixa com alguma data dela)."""
+    if not b.partida or not antes:
+        return ""
+    if any(encaixa(a, b, folga_h) for a in antes.values()):
+        mais_barato = min(antes.values(), key=lambda a: a.preco)
+        if encaixa(mais_barato, b, folga_h):
+            return ""
+        return (f"o voo mais barato de '{nome_antes}' ({mais_barato.data:%d/%m}) chega "
+                f"{mais_barato.chegada:%d/%m %H:%M}: não dá tempo; só encaixa com outra data dela")
+    chegadas = [a.chegada for a in antes.values() if a.chegada]
+    quando = f" (a chegada mais cedo é {min(chegadas):%d/%m %H:%M})" if chegadas else ""
+    return f"não encaixa com nenhuma data de '{nome_antes}' (precisa de {folga_h:g}h depois da chegada){quando}"
+
+
+def opcao_de_oferta(o, coleta: datetime) -> Opcao:
+    c = o.consulta
+    return Opcao(rota_id=c.rota_id, origem=c.origem, destino=c.destino, data=c.ida, volta=c.volta,
+                 preco=o.preco, fonte=o.fonte, vendedor=o.vendedor, link=o.link, coleta=coleta,
+                 partida=o.ida.partida if o.ida else None, chegada=o.ida.chegada if o.ida else None,
+                 escalas=o.ida.conexoes_texto() if o.ida else "")

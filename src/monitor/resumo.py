@@ -14,6 +14,7 @@ from .config import Geral
 from .historico import Estado
 from .models import Rota
 from .regras import brl
+from .roteiro import conflito, melhor_par, opcoes
 
 FUSO = ZoneInfo("America/Recife")
 
@@ -34,7 +35,7 @@ def _datas(linha: dict) -> str:
     return ida + (f" → {date.fromisoformat(linha['volta']):%d/%m}" if linha.get("volta") else " (só ida)")
 
 
-def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime) -> str:
+def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list[Rota] | None = None) -> str:
     linhas = []
     if arq_csv.exists():
         with open(arq_csv, newline="", encoding="utf-8") as f:
@@ -45,6 +46,8 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime) -> str:
                     continue
                 linhas.append(l)
     hoje, ontem = agora - timedelta(hours=24), agora - timedelta(hours=48)
+    por_id = {r.id: r for r in (todas or rotas)}
+    op = opcoes(linhas) if any(r.depois_de for r in rotas) else {}
     partes = [f"☀️ Resumo das passagens — {agora.astimezone(FUSO):%d/%m}",
               "Menor preço de cada viagem nas últimas 24h:"]
     for rota in rotas:
@@ -68,6 +71,19 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime) -> str:
             texto += f"\n   menor já visto: {brl(menor)}"
         if rota.preco_alvo:
             texto += f"\n   seu aviso: abaixo de {brl(rota.preco_alvo)}"
+        if rota.depois_de and rota.depois_de in por_id:
+            anterior = por_id[rota.depois_de]
+            nome_ant = anterior.nome or anterior.id
+            par = melhor_par(op.get(anterior.id, {}), op.get(rota.id, {}), rota.intervalo_min_horas)
+            esta = op.get(rota.id, {}).get(date.fromisoformat(m["ida"]))
+            aviso = conflito(op.get(anterior.id, {}), esta, rota.intervalo_min_horas, nome_ant) if esta else ""
+            if aviso:
+                texto += f"\n   ⚠️ {aviso}"
+            if par:
+                texto += (f"\n   🔗 encaixe mais barato com '{nome_ant}': {par[0].data:%d/%m} + {par[1].data:%d/%m}"
+                          f" = {brl(par[0].preco + par[1].preco)}")
+            else:
+                texto += f"\n   🔗 nenhuma data encaixa depois de '{nome_ant}'"
         partes.append(texto)
     partes.append("\nDurante o dia, só aviso quando o preço bater uma das suas regras.")
     return "\n".join(partes)

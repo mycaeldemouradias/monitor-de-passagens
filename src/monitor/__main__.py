@@ -26,6 +26,7 @@ from .fontes import FonteBloqueada, criar_fonte
 from .historico import Estado, Historico, agora
 from .models import Consulta, Oferta, Rota, oferta_de_dict, oferta_para_dict
 from .resumo import deve_mandar_resumo, marcar_resumo, montar_resumo
+from .roteiro import conflito, opcao_de_oferta, opcoes
 from .regras import avaliar, brl, deve_reavisar
 
 log = logging.getLogger("monitor")
@@ -243,6 +244,19 @@ def executar(args: argparse.Namespace) -> int:
     alertas.sort(key=lambda x: x[0].preco)
     alertas = alertas[: cfg.geral.max_alertas_por_execucao]
 
+    # viagens ligadas ("depois de"): avisa se o voo não encaixa com a viagem anterior
+    todas = {r.id: r for r in cfg.rotas}
+    if any(todas[o.consulta.rota_id].depois_de for o, _ in alertas if o.consulta.rota_id in todas):
+        op = _opcoes_atuais(historico.csv, ofertas, inicio)
+        for o, _ in alertas:
+            rota = todas.get(o.consulta.rota_id)
+            if rota and rota.depois_de:
+                anterior = todas.get(rota.depois_de)
+                aviso = conflito(op.get(rota.depois_de, {}), opcao_de_oferta(o, inicio), rota.intervalo_min_horas,
+                                 (anterior.nome or anterior.id) if anterior else rota.depois_de)
+                if aviso:
+                    o.avisos.append("🔗 " + aviso)
+
     for o, motivos in alertas:
         texto = mensagem(o, motivos)
         if args.simular:
@@ -255,7 +269,7 @@ def executar(args: argparse.Namespace) -> int:
     if not args.simular:
         historico.registrar(ofertas, inicio)
         if deve_mandar_resumo(estado, cfg.geral, inicio):
-            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio)
+            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio, cfg.rotas)
             if any(v == "ok" for v in notificacao.enviar(texto).values()):
                 marcar_resumo(estado, inicio)
                 log.info("Resumo diário enviado.")
@@ -270,6 +284,19 @@ def executar(args: argparse.Namespace) -> int:
              len(ofertas), len(alertas), falhas, tentativas)
     # falha o job só se TUDO falhou (o GitHub avisa por e-mail quando o job falha)
     return 1 if tentativas and falhas == tentativas else 0
+
+
+def _opcoes_atuais(arq_csv: Path, ofertas: list[Oferta], inicio) -> dict:
+    """Opções por viagem e data: histórico + o que acabou de ser encontrado nesta rodada."""
+    import csv
+    linhas = list(csv.DictReader(open(arq_csv, newline="", encoding="utf-8"))) if arq_csv.exists() else []
+    op = opcoes(linhas)
+    for o in ofertas:
+        x = opcao_de_oferta(o, inicio)
+        atual = op.setdefault(x.rota_id, {}).get(x.data)
+        if atual is None or atual.coleta < inicio or x.preco < atual.preco:
+            op[x.rota_id][x.data] = x
+    return op
 
 
 def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int) -> None:

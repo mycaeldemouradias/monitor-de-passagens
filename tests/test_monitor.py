@@ -585,3 +585,57 @@ def test_roteiro_sem_sobreposicao_e_mesma_cidade():
     assert cenarios([op["a"], op["b"], op["c"]], folga_h=3, min_dias=2, mesma=mesma) == []
     estadia = cs[0].estadias()[0]
     assert estadia[0] == "TPA" and estadia[1].day == 8 and estadia[2].day == 9
+
+
+def test_telegram_manda_para_todas_as_conversas(monkeypatch):
+    from monitor import notificacao
+
+    enviados = []
+
+    class Resp:
+        status_code, headers = 200, {"content-type": "application/json"}
+        def json(self): return {"ok": True}
+
+    monkeypatch.setattr(notificacao.requests, "post", lambda url, json, timeout: enviados.append(json["chat_id"]) or Resp())
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111, -222")
+    monkeypatch.delenv("CALLMEBOT_PHONE", raising=False)
+    assert notificacao.enviar("oi") == {"telegram": "ok"}
+    assert enviados == ["111", "-222"]
+
+
+def test_viagens_ligadas_encaixe_e_conflito(tmp_path):
+    from monitor.historico import Historico
+    from monitor.models import Trecho
+    from monitor.resumo import montar_resumo
+    from monitor.roteiro import conflito, melhor_par, opcoes
+    from monitor.viagens import validar
+
+    def of(rota, o, d, dia, preco, sai, chega):
+        c = Consulta(rota_id=rota, origem=o, destino=d, ida=date(2027, 2, dia))
+        return Oferta(c, "skiplagged", preco, ida=Trecho(datetime.fromisoformat(sai), datetime.fromisoformat(chega)))
+
+    agora = datetime(2027, 1, 5, 12, tzinfo=timezone.utc)
+    h = Historico(tmp_path)
+    h.registrar([of("a", "GIG", "TPA", 7, 1700, "2027-02-07T17:00", "2027-02-09T13:25"),
+                 of("a", "GIG", "TPA", 8, 1800, "2027-02-08T06:00", "2027-02-08T20:00"),
+                 of("b", "TPA", "MSP", 9, 370, "2027-02-09T06:54", "2027-02-09T17:18"),
+                 of("b", "TPA", "MSP", 10, 470, "2027-02-10T11:47", "2027-02-10T14:18")], agora - timedelta(hours=1))
+    import csv
+    op = opcoes(csv.DictReader(open(h.csv, encoding="utf-8")))
+    b9, b10 = op["b"][date(2027, 2, 9)], op["b"][date(2027, 2, 10)]
+    # b de 09/02 só encaixa com a de 08/02 (a de 07/02, a mais barata, chega 09/02 13:25)
+    assert "só encaixa com outra data" in conflito(op["a"], b9, 3, "RJ-Tampa")
+    assert conflito(op["a"], b10, 3, "RJ-Tampa") == ""
+    assert "nenhuma data" in conflito(op["a"], b9, 12, "RJ-Tampa")  # 08/02 20:00 + 12h > 09/02 06:54
+    par = melhor_par(op["a"], op["b"], 3)
+    assert (par[0].data.day, par[1].data.day) == (8, 9)  # 1800+370 empata com 1700+470: vence o que sai antes
+    rotas = [_rota(id="a", nome="RJ-Tampa", origem="GIG", destino="TPA"),
+             _rota(id="b", origem="TPA", destino="MSP", depois_de="a", intervalo_min_horas=3)]
+    texto = montar_resumo(h.csv, rotas, agora)
+    assert "encaixe mais barato com 'RJ-Tampa'" in texto and "só encaixa com outra data" in texto
+
+    base = {"origem": "REC", "destino": "GRU", "ida": "2027-03-10", "fontes": ["skiplagged"]}
+    assert any("círculo" in e for e in validar([{**base, "id": "x", "depois_de": "y"},
+                                                {**base, "id": "y", "depois_de": "x"}]))
+    assert any("não existe" in e for e in validar([{**base, "id": "x", "depois_de": "z"}]))

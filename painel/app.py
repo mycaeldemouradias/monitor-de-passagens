@@ -21,11 +21,11 @@ import streamlit as st
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 
-from monitor.aeroportos import rotulo, todos as aeroportos  # noqa: E402
+from monitor.aeroportos import mesma_cidade, rotulo, todos as aeroportos  # noqa: E402
 from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, ler_pausas  # noqa: E402
 from monitor.models import DIAS  # noqa: E402
 from monitor.regras import brl  # noqa: E402
-from monitor.roteiro import Cenario, cenarios, opcoes  # noqa: E402
+from monitor.roteiro import Cenario, cenarios, conflito, opcoes  # noqa: E402
 from monitor.viagens import (consultas, criar_id, ler_viagens, salvar_pausas,  # noqa: E402
                              salvar_viagens)
 
@@ -283,12 +283,33 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
         st.markdown(REGRAS_TEXTO)
     fontes = escolher_fontes(v.get("fontes") or ["google_flights", "skiplagged"], k)
 
+    st.markdown("**🔗 Ligação com outra viagem** (opcional)")
+    outras = [x["id"] for x in lista if x.get("id") != v.get("id")]
+    nomes_o = {x["id"]: nome_viagem(x) for x in lista}
+    atual_dep = v.get("depois_de") or ""
+    opc = ["", *outras]
+    depois_de = st.selectbox("Esta viagem acontece depois de…", opc, key=k + "_dep",
+                             index=opc.index(atual_dep) if atual_dep in opc else 0,
+                             format_func=lambda i: "(nenhuma)" if not i else nomes_o.get(i, i),
+                             help="Ex.: Tampa→Minneapolis depois de Rio→Tampa. O monitor avisa quando o voo mais "
+                                  "barato de um dia não respeita o intervalo, e mostra a combinação mais barata que encaixa.")
+    horas = None
+    if depois_de:
+        h_atual = float(v.get("intervalo_min_horas") or 3)
+        em_dias = h_atual >= 24 and h_atual % 24 == 0
+        c1, c2 = st.columns(2)
+        valor = c1.number_input("Intervalo mínimo entre a chegada daquela e a saída desta", 1, 999, key=k + "_int",
+                                value=int(h_atual // 24 if em_dias else h_atual))
+        unidade = c2.radio("em", ["horas", "dias"], index=1 if em_dias else 0, horizontal=True, key=k + "_unid")
+        horas = int(valor) * (24 if unidade == "dias" else 1)
+
     ids = {x["id"] for x in lista if x.get("id") != v.get("id")}
     nova_v = {
         "id": v.get("id") or criar_id(nome or f"{origem}-{destino}", ids),
         "nome": nome.strip(), "ativa": v.get("ativa", True), "origem": origem, "destino": destino,
         "ida": ida, "volta": volta, "duracao_dias": duracao, "adultos": int(adultos),
         "preco_alvo": int(alvo) or None, "queda_pct": int(queda), "fontes": fontes,
+        "depois_de": depois_de or None, "intervalo_min_horas": horas,
     }
     if ida and (tipo == "Só ida" or volta or duracao):
         try:
@@ -425,6 +446,11 @@ def tela_viagens() -> None:
                                + (" — ⚠️ todas as datas já passaram" if n == 0 else ""))
                 except Exception as e:  # noqa: BLE001
                     st.caption(f"Fontes: {fontes} · ⚠️ {e}")
+                if v.get("depois_de"):
+                    h = float(v.get("intervalo_min_horas") or 3)
+                    intervalo = f"{h / 24:g} dia(s)" if h >= 24 and h % 24 == 0 else f"{h:g}h"
+                    nome_ant = next((nome_viagem(x) for x in lista if x["id"] == v["depois_de"]), v["depois_de"])
+                    st.caption(f"🔗 Depois de **{nome_ant}**, com pelo menos {intervalo} de intervalo")
                 mostrar_precos(df, v["id"])
             with c2:
                 chave = f"tg_viagem_{v['id']}"
@@ -467,7 +493,8 @@ def _quando(dt: datetime) -> str:
     return f"{DIAS[dt.weekday()]} {dt:%d/%m %H:%M}"
 
 
-def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict) -> str:
+def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
+                    ligacoes: dict | None = None) -> str:
     import calendar
     import html
 
@@ -525,7 +552,14 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                     classes = "chip" + (" barato" if mais_barato.get(r) == dia else "")
                     classes += " voo" if r in voos.get(dia, []) else ""
                     icone = "✈️ " if r in voos.get(dia, []) else ("★ " if mais_barato.get(r) == dia else "")
-                    titulo = html.escape(f"{nomes.get(r, r)} · {o.fonte}" + (f" · sai {o.partida:%H:%M}" if o.partida else ""))
+                    titulo = f"{nomes.get(r, r)} · {o.fonte}" + (f" · sai {o.partida:%H:%M}" if o.partida else "")
+                    lig = (ligacoes or {}).get(r)
+                    aviso = conflito(op.get(lig[0], {}), o, lig[1], nomes.get(lig[0], lig[0])) if lig else ""
+                    if aviso:
+                        classes += " conflito"
+                        icone = "⚠️ " + icone
+                        titulo += " · ⚠️ " + aviso
+                    titulo = html.escape(titulo)
                     cel.append(f'<div class="{classes}" title="{titulo}">{icone}{o.origem}→{o.destino} '
                                f'<b>{html.escape(brl(o.preco))}</b></div>')
             linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
@@ -541,6 +575,7 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     .cal .chip{background:#f3f4f6;border-radius:6px;padding:2px 4px;margin:2px 0;line-height:1.25;overflow-wrap:anywhere}
     .cal .chip.barato{background:#dcfce7;border:1px solid #16a34a}
     .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
+    .cal .chip.conflito{border:1px dashed #dc2626}
     </style>"""
     return css + "".join(linhas)
 
@@ -556,6 +591,7 @@ def tela_calendario() -> None:
     lista = viagens()
     nomes = {v["id"]: nome_viagem(v) for v in lista}
     op = opcoes(df.to_dict("records"))
+    ligacoes = {v["id"]: (v["depois_de"], float(v.get("intervalo_min_horas") or 3)) for v in lista if v.get("depois_de")}
     ids = [v["id"] for v in lista if v["id"] in op]
     if not ids:
         sem_dados()
@@ -571,13 +607,34 @@ def tela_calendario() -> None:
                    "chegou, saindo da mesma cidade (JFK e LGA contam como Nova York). Usa o horário do voo mais "
                    "barato de cada dia; preços sem horário (Kayak) e ida e volta ficam de fora.")
         so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
-        trechos = st.multiselect("Trechos, na ordem", so_ida, format_func=rotulo_v, placeholder="Escolha 2 ou mais")
+        cadeias = []
+        for v in lista:  # roteiros formados pelas ligações "depois de" (da primeira até a última viagem)
+            if v.get("depois_de") and not any(x.get("depois_de") == v["id"] for x in lista):
+                cadeia, atual = [v["id"]], v
+                while atual and atual.get("depois_de") and atual["depois_de"] not in cadeia:
+                    cadeia.insert(0, atual["depois_de"])
+                    atual = next((x for x in lista if x["id"] == atual["depois_de"]), None)
+                cadeias.append(cadeia)
+        modo = "Escolher os trechos"
+        if cadeias:
+            modo = st.radio("Como montar", ["Pelas ligações que marquei", "Escolher os trechos"], horizontal=True)
+        folgas = None
+        if modo == "Pelas ligações que marquei":
+            cadeia = st.selectbox("Roteiro", cadeias, format_func=lambda c: " → ".join(nomes.get(i, i) for i in c))
+            trechos = [i for i in cadeia if i in so_ida]
+            folgas = [float(next(x for x in lista if x["id"] == i).get("intervalo_min_horas") or 3) for i in trechos[1:]]
+            if len(trechos) < len(cadeia):
+                st.caption("Algumas viagens desse roteiro ainda não têm preço com horário e ficaram de fora.")
+            st.caption("Usa o intervalo mínimo que você marcou em cada ligação.")
+        else:
+            trechos = st.multiselect("Trechos, na ordem", so_ida, format_func=rotulo_v, placeholder="Escolha 2 ou mais")
         c1, c2 = st.columns(2)
-        folga = c1.number_input("Folga mínima entre um voo e outro (horas)", 1, 240, 3)
+        folga = c1.number_input("Folga mínima entre um voo e outro (horas)", 1, 240, 3, disabled=folgas is not None)
         min_dias = c2.number_input("Ficar no mínimo (dias) em cada lugar", 0, 60, 0,
                                    help="0 = pode seguir no mesmo dia, respeitando a folga.")
         if len(trechos) >= 2:
-            cs = cenarios([op[t] for t in trechos], folga, min_dias, limite=10)
+            cs = cenarios([op[t] for t in trechos], folgas or folga, min_dias, limite=10,
+                          mesma=None if folgas is not None else mesma_cidade)
             if not cs:
                 st.warning("Nenhuma combinação de datas encaixa com essas regras. Tente diminuir a folga ou os "
                            "dias mínimos, ou confira se cada trecho sai da cidade onde o anterior chega.")
@@ -608,9 +665,11 @@ def tela_calendario() -> None:
         return
     inicial = (cen.trechos[0].partida.year, cen.trechos[0].partida.month) if cen else meses[0]
     mes = st.selectbox("Mês", meses, index=meses.index(inicial), format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
-    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes), unsafe_allow_html=True)
+    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes, ligacoes), unsafe_allow_html=True)
+    legenda = "⚠️ = o voo mais barato desse dia não encaixa com a viagem anterior (passe o mouse para ver o motivo)."
     if cen:
-        st.caption("Azul ✈️ = voo do roteiro escolhido. As cores de fundo mostram em que cidade você estaria.")
+        legenda = "Azul ✈️ = voo do roteiro escolhido. As cores de fundo mostram em que cidade você estaria. " + legenda
+    st.caption(legenda)
 
 
 def tela_historico() -> None:
@@ -986,6 +1045,69 @@ def execucoes(limite: int = 8) -> list[dict]:
     return json.loads(saida) if ok and saida.startswith("[") else []
 
 
+def _env() -> dict:
+    from dotenv import dotenv_values
+    return dotenv_values(RAIZ / ".env")
+
+
+def _gravar_env(nome: str, valor: str) -> None:
+    arq = RAIZ / ".env"
+    linhas = arq.read_text(encoding="utf-8").splitlines()
+    novas = [f"{nome}={valor}" if l.strip().startswith(f"{nome}=") else l for l in linhas]
+    if not any(l.strip().startswith(f"{nome}=") for l in linhas):
+        novas.append(f"{nome}={valor}")
+    arq.write_text("\n".join(novas) + "\n", encoding="utf-8")
+
+
+def tela_avisos() -> None:
+    from monitor.notificacao import conversas_do_bot
+    st.title("📣 Onde chegam os avisos")
+    st.caption("Os avisos e o resumo diário vão para todas as conversas marcadas aqui: seu privado e grupos.")
+    env = _env()
+    token, atuais = env.get("TELEGRAM_BOT_TOKEN"), [c.strip() for c in (env.get("TELEGRAM_CHAT_ID") or "").split(",") if c.strip()]
+    if not token:
+        st.error("Falta o TELEGRAM_BOT_TOKEN no .env.")
+        return
+    st.markdown("**Para incluir um grupo:** no Telegram, adicione o bot ao grupo e mande qualquer mensagem lá. "
+                "Depois clique em **Procurar conversas do bot** (o Telegram só mostra o que aconteceu nas "
+                "últimas ~24h).")
+    if st.button("🔎 Procurar conversas do bot") or "conversas" not in st.session_state:
+        try:
+            st.session_state["conversas"] = conversas_do_bot(token)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Não consegui falar com o Telegram ({type(e).__name__}).")
+            st.session_state["conversas"] = {}
+    achadas = dict(st.session_state.get("conversas") or {})
+    for c in atuais:  # as que já recebem avisos aparecem mesmo que o Telegram não as mostre agora
+        achadas.setdefault(c, {"tipo": "?", "nome": "(conversa já cadastrada)", "saiu": False})
+    tipos = {"private": "👤 privado", "group": "👥 grupo", "supergroup": "👥 grupo", "channel": "📢 canal"}
+    escolhidas = []
+    for cid, info in achadas.items():
+        rotulo_c = f"{tipos.get(info['tipo'], '💬')} · {info['nome']}" + (" — o bot saiu deste grupo" if info["saiu"] else "")
+        if st.checkbox(rotulo_c, value=cid in atuais and not info["saiu"], key=f"chat_{cid}", disabled=info["saiu"]):
+            escolhidas.append(cid)
+    if sorted(escolhidas) != sorted(atuais):
+        st.warning("Você mudou as conversas. Clique em salvar para valer.")
+        if st.button("💾 Salvar e enviar ao GitHub", type="primary", disabled=not escolhidas):
+            valor = ",".join(escolhidas)
+            _gravar_env("TELEGRAM_CHAT_ID", valor)
+            ok, saida = True, ""
+            if (RAIZ / ".git").exists():
+                try:
+                    r = subprocess.run(["gh", "secret", "set", "TELEGRAM_CHAT_ID", "--repo", REPO], input=valor,
+                                       text=True, capture_output=True, cwd=RAIZ, timeout=60)
+                    ok, saida = r.returncode == 0, r.stderr[:300]
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    ok, saida = False, str(e)
+            (st.success if ok else st.error)("Salvo no Mac e no GitHub." if ok else f"Salvo no Mac, mas não no GitHub: {saida}")
+    if st.button("✉️ Mandar mensagem de teste para as conversas salvas"):
+        from monitor import notificacao
+        os.environ.update({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": _env().get("TELEGRAM_CHAT_ID") or ""})
+        res = notificacao.enviar("✅ Teste do Monitor de Passagens: este lugar vai receber os avisos.")
+        (st.success if res.get("telegram") == "ok" else st.error)(
+            "Mensagem enviada." if res.get("telegram") == "ok" else "Falhou. Peça ajuda ao Claude.")
+
+
 def tela_publicar() -> None:
     st.title("☁️ Salvar e publicar")
     st.success("Tudo o que você muda no painel já fica **salvo no Mac** na hora.")
@@ -1050,6 +1172,7 @@ PAGINAS = {
     "analise": st.Page(tela_analise, title="Melhor dia e horário", icon="🗓️", url_path="analise"),
     "buscas": st.Page(tela_buscas, title="Histórico de buscas", icon="🔎", url_path="buscas"),
     "parar": st.Page(tela_parar, title="Pausar e parar", icon="⏸️", url_path="parar"),
+    "avisos": st.Page(tela_avisos, title="Onde chegam os avisos", icon="📣", url_path="avisos"),
     "testar": st.Page(tela_testar, title="Testar uma viagem", icon="🧪", url_path="testar"),
     "publicar": st.Page(tela_publicar, title="Salvar e publicar", icon="☁️", url_path="publicar"),
 }
