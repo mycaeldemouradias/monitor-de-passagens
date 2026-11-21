@@ -571,7 +571,8 @@ def _mais_baratos_do_dia(chips: list) -> dict:
 
 
 def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
-                    voos: dict | None = None, rotas_lig: dict | None = None, clicavel: bool = False) -> str:
+                    voos: dict | None = None, rotas_lig: dict | None = None, clicavel: bool = False,
+                    problemas: dict | None = None) -> str:
     import calendar
     import html
 
@@ -645,6 +646,11 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                     dias = (o.chegada.date() - o.partida.date()).days
                     hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
                             + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
+                problema = (problemas or {}).get((r, dia))
+                if problema:  # voo marcado no simulador que se sobrepõe ou foge das ligações
+                    classes += " problema"
+                    icone = "❌ "
+                    titulo = html.escape(problema) + " · " + titulo
                 marca_id = f' data-id="{html.escape(r)}|{dia.isoformat()}"' if clicavel else ""
                 cel.append(f'<div class="{classes}"{marca_id} title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
                            f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
@@ -663,6 +669,7 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     .cal .chip.barato{background:#dcfce7;border:1px solid #16a34a}
     .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
     .cal .chip.conflito{border:1px dashed #dc2626}
+    .cal .chip.problema{background:#dc2626 !important;color:#fff !important;border:none !important}
     </style>"""
     return css + "".join(linhas)
 
@@ -775,6 +782,60 @@ def calendario_clicavel(html_cal: str, selecionados: list[str], chave: str) -> l
     return selecionados if valor is None else list(valor)
 
 
+ARQ_SIMULACOES = Path(__file__).resolve().parent / "simulacoes.json"  # só no Mac (fora do Git)
+
+
+def _sim_ler() -> dict:
+    try:
+        d = json.loads(ARQ_SIMULACOES.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    return {"atual": d.get("atual") or {"marcados": [], "voos": {}}, "salvas": d.get("salvas") or {}}
+
+
+def _sim_gravar(d: dict) -> None:
+    ARQ_SIMULACOES.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _sim_carregar(sim: dict) -> None:
+    """Põe uma simulação (marcados + voo escolhido em cada um) na tela; os voos entram na próxima rodada."""
+    for k in [k for k in st.session_state if str(k).startswith("sim_voo_")]:
+        del st.session_state[k]
+    st.session_state["sim_marcados"] = list(sim.get("marcados") or [])
+    st.session_state["sim_pendente_voos"] = dict(sim.get("voos") or {})
+
+
+def abrir_no_simulador(cen: Cenario) -> None:
+    _sim_carregar({"marcados": [f"{o.rota_id}|{o.data.isoformat()}" for o in cen.trechos],
+                   "voos": {f"{o.rota_id}|{o.data.isoformat()}": o.partida.isoformat() for o in cen.trechos}})
+    st.session_state["sim_carregado"] = True
+    st.switch_page(PAGINAS["simulador"])
+
+
+def problemas_da_simulacao(escolhidos: list, rotas_lig: dict, nomes: dict) -> dict:
+    """{(viagem, data): motivo} dos voos marcados que se sobrepõem ao anterior ou fogem das ligações."""
+    from monitor.roteiro import _intervalo_txt, encaixa
+    saida: dict = {}
+    anterior, feitos = None, []
+    for _x, r, d, _l, o in escolhidos:
+        rotulo_v = f"{o.origem}→{o.destino} {d:%d/%m}"
+        if anterior and anterior.chegada and o.partida and o.partida < anterior.chegada:
+            saida[(r, d)] = (f"Sobrepõe: {rotulo_v} sai {o.partida:%d/%m %H:%M}, antes de {anterior.origem}→"
+                             f"{anterior.destino} chegar ({anterior.chegada:%d/%m %H:%M})")
+        lig = rotas_lig.get(r)
+        if (r, d) not in saida and lig and lig.depois_de:
+            antes = [p for p in feitos if p.rota_id in lig.depois_de]
+            quais = " ou ".join(nomes.get(a, a) for a in lig.depois_de)
+            if not antes:
+                saida[(r, d)] = f"{rotulo_v}: falta antes dele uma destas viagens: {quais}"
+            elif not any(encaixa(p, o, lig.intervalo_min_horas, lig.intervalo_max_horas) for p in antes):
+                saida[(r, d)] = (f"{rotulo_v}: a ligação pede {_intervalo_txt(lig.intervalo_min_horas, lig.intervalo_max_horas)}"
+                                 f" depois da chegada de {quais}")
+        anterior = o
+        feitos.append(o)
+    return saida
+
+
 def tela_simulador() -> None:
     from monitor.aeroportos import mesma_cidade
     st.title("🧮 Simular viagem")
@@ -792,6 +853,10 @@ def tela_simulador() -> None:
         sem_dados()
         return
     rotas_lig = {r.id: r for r in _rotas_obj(lista)}
+    arquivo = _sim_ler()
+    if not st.session_state.get("sim_carregado"):  # 1ª vez: volta a última simulação
+        _sim_carregar(arquivo["atual"])
+        st.session_state["sim_carregado"] = True
     marcados = [x for x in st.session_state.get("sim_marcados", [])
                 if x.split("|")[0] in op and date.fromisoformat(x.split("|")[1]) in op[x.split("|")[0]]]
 
@@ -799,15 +864,21 @@ def tela_simulador() -> None:
     def opcoes_do_dia(r: str, d: date) -> list:
         return sorted(voos.get(r, {}).get(d) or [op[r][d]], key=lambda o: o.preco)
 
+    pendentes = st.session_state.pop("sim_pendente_voos", {}) or {}
     escolhidos = []
     for x in marcados:
         r, d = x.split("|")[0], date.fromisoformat(x.split("|")[1])
         lista_o = opcoes_do_dia(r, d)
+        if x in pendentes:  # voo escolhido numa simulação salva / no roteiro: acha o mesmo horário
+            alvo = pendentes[x]
+            st.session_state[f"sim_voo_{x}"] = next(
+                (j for j, o in enumerate(lista_o) if o.partida and o.partida.isoformat() == alvo), 0)
         i = st.session_state.get(f"sim_voo_{x}", 0)
         escolhidos.append((x, r, d, lista_o, lista_o[min(i, len(lista_o) - 1)]))
     escolhidos.sort(key=lambda e: (e[4].partida or datetime.combine(e[2], datetime.min.time())))
     com_hora = [e[4] for e in escolhidos if e[4].partida and e[4].chegada]
     cen = Cenario(com_hora) if com_hora else None
+    problemas_sel = problemas_da_simulacao(escolhidos, rotas_lig, nomes)
 
     c1, c2 = st.columns([4, 1])
     with c1:
@@ -816,23 +887,65 @@ def tela_simulador() -> None:
     with c2:
         st.write("")
         if st.button("🧹 Limpar seleção"):
-            st.session_state["sim_marcados"] = []
-            for k in [k for k in st.session_state if str(k).startswith("sim_voo_")]:
-                del st.session_state[k]
+            _sim_carregar({})
             st.rerun()
+    with st.expander("💾 Simulações salvas"):
+        c1, c2 = st.columns([3, 1])
+        nome_sim = c1.text_input("Nome para guardar a simulação atual", placeholder="Ex.: via Porto, volta 01/03")
+        if c2.button("Guardar", disabled=not (nome_sim.strip() and marcados)):
+            arquivo["salvas"][nome_sim.strip()] = {
+                "marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+                "total": round(sum(e[4].preco for e in escolhidos), 2), "quando": datetime.now().isoformat(timespec="minutes")}
+            _sim_gravar(arquivo)
+            st.toast(f"Guardada: {nome_sim.strip()}", icon="💾")
+        if arquivo["salvas"]:
+            nomes_s = list(arquivo["salvas"])
+            esc = st.selectbox("Guardadas", nomes_s, format_func=lambda n: f"{n} · {brl(arquivo['salvas'][n].get('total', 0))} "
+                               f"(guardada em {arquivo['salvas'][n].get('quando', '')[:16].replace('T', ' ')})")
+            b1, b2, _ = st.columns([1, 1, 3])
+            if b1.button("Abrir"):
+                _sim_carregar(arquivo["salvas"][esc])
+                st.rerun()
+            if b2.button("Apagar"):
+                arquivo["salvas"].pop(esc, None)
+                _sim_gravar(arquivo)
+                st.rerun()
+            st.caption("O total mostrado é o da hora em que foi guardada; ao abrir, os preços são os mais recentes.")
+    # aviso na hora: logo acima do calendário, sem precisar rolar até o fim
+    if escolhidos:
+        c1, c2 = st.columns([1, 3])
+        c1.metric("Total marcado", brl(sum(e[4].preco for e in escolhidos)))
+        with c2:
+            sobre = [m for m in problemas_sel.values() if m.startswith("Sobrepõe")]
+            fora = [m for m in problemas_sel.values() if not m.startswith("Sobrepõe")]
+            if sobre:
+                st.error("❌ " + "  \n❌ ".join(sobre))
+            if fora:
+                st.warning("🔗 " + "  \n🔗 ".join(fora))
+            if not problemas_sel:
+                st.success(f"{len(escolhidos)} voo(s) marcado(s), nenhum se sobrepõe e todos respeitam as ligações.")
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
-                       + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True)
+                       + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True,
+                                         problemas=problemas_sel)
                        for a, m in meses_sel)
     novos = calendario_clicavel(html_cal, marcados, "sim_cal")
     if sorted(novos) != sorted(marcados):
         st.session_state["sim_marcados"] = novos
         st.rerun()
 
+    # guarda a simulação atual no Mac (volta igual quando você abrir o painel de novo)
+    atual = {"marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida}}
+    if atual != arquivo["atual"]:
+        arquivo["atual"] = atual
+        _sim_gravar(arquivo)
+
     st.subheader("Sua viagem simulada")
     if not escolhidos:
         st.info("Clique nos voos do calendário acima para montar a viagem.")
         return
-    total, anterior, problemas = 0.0, None, 0
+    from monitor.roteiro import _intervalo_txt, encaixa
+    total, anterior, problemas, fora_regra = 0.0, None, 0, 0
+    feitos: list = []
     for x, r, d, lista_o, _ in escolhidos:
         with st.container(border=True):
             fmt = lambda o: (f"sai {o.partida:%d/%m %H:%M} · chega {o.chegada:%d/%m %H:%M} · " if o.partida and o.chegada else "") + \
@@ -857,13 +970,30 @@ def tela_simulador() -> None:
                 if not mesma_cidade(anterior.destino, o.origem):
                     st.warning(f"O voo anterior chega em {cidade_curta(anterior.destino)} e este sai de "
                                f"{cidade_curta(o.origem)}: você precisa se deslocar entre as cidades.")
+            # as ligações que você marcou nas viagens (🔗 "depois de qualquer uma destas")
+            lig = rotas_lig.get(r)
+            if lig and lig.depois_de:
+                antes = [p for p in feitos if p.rota_id in lig.depois_de]
+                quais = " ou ".join(nomes.get(a, a) for a in lig.depois_de)
+                if not antes:
+                    st.info(f"🔗 Você ligou esta viagem para acontecer depois de **{quais}**, e nenhuma delas está "
+                            "marcada antes dela na simulação.")
+                    fora_regra += 1
+                elif not any(encaixa(p, o, lig.intervalo_min_horas, lig.intervalo_max_horas) for p in antes):
+                    st.warning(f"🔗 A ligação pede {_intervalo_txt(lig.intervalo_min_horas, lig.intervalo_max_horas)} "
+                               f"entre a chegada de {quais} e esta saída; aqui não respeita.")
+                    fora_regra += 1
             total += o.preco
             anterior = o
+            feitos.append(o)
     st.metric("Valor total", brl(total), help="Soma dos voos escolhidos (preços da última coleta; podem ter mudado).")
     if problemas:
         st.error(f"{problemas} voo(s) se sobrepõem. Troque a data ou o horário marcado em vermelho.")
     else:
         st.success("Nenhum voo se sobrepõe.")
+    if fora_regra:
+        st.warning(f"{fora_regra} trecho(s) fora das ligações que você marcou nas viagens. Por isso esta simulação "
+                   "pode sair mais barata que os \"Roteiros possíveis\", que só usam combinações dentro das ligações.")
 
 
 def tela_calendario() -> None:
@@ -907,6 +1037,8 @@ def tela_calendario() -> None:
             else:
                 cen = _escolher_cenario(cs, "cen_lig")
                 _mostrar_cenario(cen, nomes)
+                if st.button("🧮 Abrir este roteiro no simulador", key="abrir_sim_lig"):
+                    abrir_no_simulador(cen)
 
     problemas = ligacoes_impossiveis(rotas, voos, nomes)
     if problemas:

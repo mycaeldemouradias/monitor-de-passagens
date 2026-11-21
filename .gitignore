@@ -20,3 +20,4 @@ data/historico/*
 CONTEXTO CLAUDE/
 # (de novo no fim: as exceções acima não podem trazer de volta os "._*" do macOS)
 ._*
+painel/simulacoes.json
