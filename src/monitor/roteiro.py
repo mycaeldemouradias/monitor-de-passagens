@@ -152,11 +152,21 @@ def todos_os_voos(melhores: dict[str, dict[date, Opcao]],
 
 # ------------------------------------------------------------------ encaixe entre viagens ligadas
 def encaixa(antes: Opcao, depois: Opcao, min_h: float, max_h: float | None = None) -> bool:
-    """`depois` sai entre `min_h` e `max_h` horas depois que `antes` chegou?"""
+    """`depois` sai entre `min_h` e `max_h` horas depois que `antes` chegou?
+
+    Máximo em dias inteiros conta dias completos: "até 2 dias" aceita até 2 dias e 23h59 (2,9 dias ainda
+    são 2 dias; 3 dias, não). Máximo em horas é exato.
+    """
     if not (antes.chegada and depois.partida):
         return False
     intervalo = depois.partida - antes.chegada
-    return intervalo >= timedelta(hours=min_h) and (max_h is None or intervalo <= timedelta(hours=max_h))
+    if intervalo < timedelta(hours=min_h):
+        return False
+    if max_h is None:
+        return True
+    if max_h >= 24 and max_h % 24 == 0:
+        return intervalo < timedelta(hours=max_h + 24)
+    return intervalo <= timedelta(hours=max_h)
 
 
 def _usaveis(dias: dict[date, list[Opcao]]) -> list[Opcao]:

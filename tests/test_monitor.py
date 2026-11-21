@@ -793,3 +793,20 @@ def test_pagina_trancada_so_abre_com_a_senha():
     assert abrir("senha certa") == "<p>REC → LIS R$ 1.234,56</p>"
     with pytest.raises(InvalidTag):
         abrir("senha errada")
+
+
+def test_maximo_em_dias_conta_dias_completos():
+    from monitor.roteiro import Opcao, encaixa
+
+    chega = datetime(2027, 2, 15, 11, 30)
+    a = Opcao("a", "MSP", "CDG", date(2027, 2, 13), None, 100, "s", "", "", datetime(2026, 1, 1), chega - timedelta(hours=9), chega)
+
+    def sai(horas):
+        p = chega + timedelta(hours=horas)
+        return Opcao("b", "BVA", "LIS", p.date(), None, 100, "s", "", "", datetime(2026, 1, 1), p, p + timedelta(hours=2))
+
+    assert encaixa(a, sai(52.6), 24, 48)          # 2,2 dias = "2 dias"
+    assert encaixa(a, sai(71.9), 24, 48)          # 2,99 dias ainda é "2 dias"
+    assert not encaixa(a, sai(72), 24, 48)        # 3 dias, não
+    assert not encaixa(a, sai(23.9), 24, 48)      # mínimo continua exato
+    assert encaixa(a, sai(2), 1, 2) and not encaixa(a, sai(2.5), 1, 2)  # em horas: exato

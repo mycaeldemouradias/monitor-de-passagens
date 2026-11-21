@@ -1034,7 +1034,8 @@ def campo_intervalo(chave: str, min_h: float, max_h: float | None) -> tuple[floa
     vmin = c1.number_input("No mínimo", 0, 9999, _limitar(min_h // 24 if em_dias(min_h) else min_h, 0, 9999), key=chave + "_min")
     umin = c2.radio("em", ["horas", "dias"], index=1 if em_dias(min_h) else 0, key=chave + "_umin", horizontal=False)
     vmax = c3.number_input("No máximo (0 = sem limite)", 0, 9999,
-                           _limitar((max_h // 24 if em_dias(max_h) else max_h) if max_h else 0, 0, 9999), key=chave + "_max")
+                           _limitar((max_h // 24 if em_dias(max_h) else max_h) if max_h else 0, 0, 9999), key=chave + "_max",
+                           help="Em dias, contam dias completos: \"até 2 dias\" aceita até 2 dias e 23h. Em horas, é exato.")
     umax = c4.radio("em ", ["horas", "dias"], index=1 if (max_h and em_dias(max_h)) else 0, key=chave + "_umax",
                     horizontal=False)
     mn = float(vmin) * (24 if umin == "dias" else 1)
