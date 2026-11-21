@@ -647,10 +647,11 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                     hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
                             + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
                 problema = (problemas or {}).get((r, dia))
-                if problema:  # voo marcado no simulador que se sobrepõe ou foge das ligações
-                    classes += " problema"
-                    icone = "❌ "
-                    titulo = html.escape(problema) + " · " + titulo
+                if problema:  # voo marcado: ❌ choque de horário / ⚠️ fora das ligações
+                    tipo, motivo = problema
+                    classes += " problema" if tipo == "sobrepoe" else " foraregra"
+                    icone = "❌ " if tipo == "sobrepoe" else "⚠️ "
+                    titulo = html.escape(motivo) + " · " + titulo
                 marca_id = f' data-id="{html.escape(r)}|{dia.isoformat()}"' if clicavel else ""
                 cel.append(f'<div class="{classes}"{marca_id} title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
                            f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
@@ -670,6 +671,7 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
     .cal .chip.conflito{border:1px dashed #dc2626}
     .cal .chip.problema{background:#dc2626 !important;color:#fff !important;border:none !important}
+    .cal .chip.foraregra{background:#f59e0b !important;color:#111827 !important;border:none !important}
     </style>"""
     return css + "".join(linhas)
 
@@ -813,27 +815,55 @@ def abrir_no_simulador(cen: Cenario) -> None:
 
 
 def problemas_da_simulacao(escolhidos: list, rotas_lig: dict, nomes: dict) -> dict:
-    """{(viagem, data): motivo} dos voos marcados que se sobrepõem ao anterior ou fogem das ligações."""
+    """{(viagem, data): (tipo, motivo)} dos voos marcados com problema.
+
+    tipo "sobrepoe": sai antes de o voo anterior chegar (choque de verdade).
+    tipo "ligacao": não respeita a ligação que você marcou na viagem (falta a anterior ou intervalo fora).
+    """
     from monitor.roteiro import _intervalo_txt, encaixa
+
+    def tempo(h: float) -> str:
+        return f"{h / 24:.1f} dias".replace(".", ",") if h >= 24 else f"{h:.0f}h"
     saida: dict = {}
     anterior, feitos = None, []
     for _x, r, d, _l, o in escolhidos:
         rotulo_v = f"{o.origem}→{o.destino} {d:%d/%m}"
         if anterior and anterior.chegada and o.partida and o.partida < anterior.chegada:
-            saida[(r, d)] = (f"Sobrepõe: {rotulo_v} sai {o.partida:%d/%m %H:%M}, antes de {anterior.origem}→"
-                             f"{anterior.destino} chegar ({anterior.chegada:%d/%m %H:%M})")
+            saida[(r, d)] = ("sobrepoe", f"{rotulo_v} sai {o.partida:%d/%m %H:%M}, antes de {anterior.origem}→"
+                                         f"{anterior.destino} chegar ({anterior.chegada:%d/%m %H:%M})")
         lig = rotas_lig.get(r)
         if (r, d) not in saida and lig and lig.depois_de:
             antes = [p for p in feitos if p.rota_id in lig.depois_de]
             quais = " ou ".join(nomes.get(a, a) for a in lig.depois_de)
+            regra = _intervalo_txt(lig.intervalo_min_horas, lig.intervalo_max_horas)
             if not antes:
-                saida[(r, d)] = f"{rotulo_v}: falta antes dele uma destas viagens: {quais}"
+                saida[(r, d)] = ("ligacao", f"{rotulo_v}: na ligação que você marcou, antes dele vem {quais}, e "
+                                            "nenhuma delas está marcada")
             elif not any(encaixa(p, o, lig.intervalo_min_horas, lig.intervalo_max_horas) for p in antes):
-                saida[(r, d)] = (f"{rotulo_v}: a ligação pede {_intervalo_txt(lig.intervalo_min_horas, lig.intervalo_max_horas)}"
-                                 f" depois da chegada de {quais}")
+                p = antes[-1]
+                h = (o.partida - p.chegada).total_seconds() / 3600 if p.chegada and o.partida else 0
+                saida[(r, d)] = ("ligacao", f"{rotulo_v}: a ligação que você marcou pede {regra} depois da chegada de "
+                                            f"{p.origem}→{p.destino} ({p.chegada:%d/%m %H:%M}); aqui são {tempo(h)}. "
+                                            "Não é choque de horário: se quiser, ajuste o intervalo no ✏️ da viagem")
         anterior = o
         feitos.append(o)
     return saida
+
+
+def _diferenca(valor: float) -> str:
+    """'-R$ 267,21' / '+R$ 50,00' (o sinal na frente faz a seta do st.metric apontar certo)."""
+    return ("-" if valor < 0 else "+") + brl(abs(valor))
+
+
+def mostrar_problemas(problemas: dict, escolhidos: list, chave_ok: str = "") -> None:
+    sobre = [m for t, m in problemas.values() if t == "sobrepoe"]
+    fora = [m for t, m in problemas.values() if t == "ligacao"]
+    if sobre:
+        st.error("❌ **Choque de horário:**  \n" + "  \n".join(sobre))
+    if fora:
+        st.warning("⚠️ **Fora das ligações que você marcou:**  \n" + "  \n".join(fora))
+    if not problemas and escolhidos:
+        st.success(f"{len(escolhidos)} voo(s) marcado(s): nenhum choque de horário e todos dentro das suas ligações.")
 
 
 def tela_simulador() -> None:
@@ -916,14 +946,7 @@ def tela_simulador() -> None:
         c1, c2 = st.columns([1, 3])
         c1.metric("Total marcado", brl(sum(e[4].preco for e in escolhidos)))
         with c2:
-            sobre = [m for m in problemas_sel.values() if m.startswith("Sobrepõe")]
-            fora = [m for m in problemas_sel.values() if not m.startswith("Sobrepõe")]
-            if sobre:
-                st.error("❌ " + "  \n❌ ".join(sobre))
-            if fora:
-                st.warning("🔗 " + "  \n🔗 ".join(fora))
-            if not problemas_sel:
-                st.success(f"{len(escolhidos)} voo(s) marcado(s), nenhum se sobrepõe e todos respeitam as ligações.")
+            mostrar_problemas(problemas_sel, escolhidos)
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
                        + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True,
                                          problemas=problemas_sel)
@@ -968,21 +991,17 @@ def tela_simulador() -> None:
                     if horas < 3:
                         st.warning("Menos de 3h entre os voos: apertado, principalmente com bilhetes separados.")
                 if not mesma_cidade(anterior.destino, o.origem):
-                    st.warning(f"O voo anterior chega em {cidade_curta(anterior.destino)} e este sai de "
-                               f"{cidade_curta(o.origem)}: você precisa se deslocar entre as cidades.")
+                    if cidade_curta(anterior.destino) == cidade_curta(o.origem):
+                        st.warning(f"O voo anterior chega no aeroporto {anterior.destino} e este sai de outro aeroporto, "
+                                   f"{o.origem} ({cidade_curta(o.origem)}): conte o tempo de deslocamento entre eles.")
+                    else:
+                        st.warning(f"O voo anterior chega em {cidade_curta(anterior.destino)} e este sai de "
+                                   f"{cidade_curta(o.origem)}: você precisa se deslocar entre as cidades.")
             # as ligações que você marcou nas viagens (🔗 "depois de qualquer uma destas")
-            lig = rotas_lig.get(r)
-            if lig and lig.depois_de:
-                antes = [p for p in feitos if p.rota_id in lig.depois_de]
-                quais = " ou ".join(nomes.get(a, a) for a in lig.depois_de)
-                if not antes:
-                    st.info(f"🔗 Você ligou esta viagem para acontecer depois de **{quais}**, e nenhuma delas está "
-                            "marcada antes dela na simulação.")
-                    fora_regra += 1
-                elif not any(encaixa(p, o, lig.intervalo_min_horas, lig.intervalo_max_horas) for p in antes):
-                    st.warning(f"🔗 A ligação pede {_intervalo_txt(lig.intervalo_min_horas, lig.intervalo_max_horas)} "
-                               f"entre a chegada de {quais} e esta saída; aqui não respeita.")
-                    fora_regra += 1
+            prob = problemas_sel.get((r, d))
+            if prob and prob[0] == "ligacao":
+                st.warning("⚠️ " + prob[1])
+                fora_regra += 1
             total += o.preco
             anterior = o
             feitos.append(o)
@@ -992,7 +1011,8 @@ def tela_simulador() -> None:
     else:
         st.success("Nenhum voo se sobrepõe.")
     if fora_regra:
-        st.warning(f"{fora_regra} trecho(s) fora das ligações que você marcou nas viagens. Por isso esta simulação "
+        st.warning(f"{fora_regra} trecho(s) fora das ligações que você marcou nas viagens (não é choque de horário). "
+                   "Por isso esta simulação "
                    "pode sair mais barata que os \"Roteiros possíveis\", que só usam combinações dentro das ligações.")
 
 
@@ -1069,18 +1089,75 @@ def tela_calendario() -> None:
     st.subheader("Calendário")
     st.caption("Cada dia mostra as viagens com saída naquele dia e o voo mais barato daquela data. "
                "**★ verde** = o mais barato do dia entre as rotas para o mesmo destino, ou entre as que saem da "
-               "mesma origem. ⚠️ = esse voo não encaixa nas ligações (passe o mouse para ver o motivo).")
+               "mesma origem. **Clique num voo** para tirar ou pôr no roteiro (azul = no roteiro).")
+
+    # roteiro editável: começa com o escolhido acima; você pode desmarcar um voo e marcar outro
+    sugeridos = [f"{o.rota_id}|{o.data.isoformat()}" for o in cen.trechos] if cen else []
+    assinatura = tuple(f"{o.rota_id}|{o.data.isoformat()}|{o.partida.isoformat()}" for o in cen.trechos) if cen else ()
+    if st.session_state.get("cal_assinatura") != assinatura:
+        st.session_state["cal_assinatura"] = assinatura
+        st.session_state["cal_marcados"] = list(sugeridos)
+        st.session_state["cal_voos"] = {f"{o.rota_id}|{o.data.isoformat()}": o.partida.isoformat()
+                                        for o in cen.trechos} if cen else {}
+    marcados = [x for x in st.session_state.get("cal_marcados", [])
+                if x.split("|")[0] in op and date.fromisoformat(x.split("|")[1]) in op[x.split("|")[0]]]
+    preferidos = st.session_state.get("cal_voos", {})
+    escolhidos = []
+    for x in marcados:
+        r, d = x.split("|")[0], date.fromisoformat(x.split("|")[1])
+        lista_o = sorted(voos.get(r, {}).get(d) or [op[r][d]], key=lambda o: o.preco)
+        o = next((o for o in lista_o if o.partida and o.partida.isoformat() == preferidos.get(x)), lista_o[0])
+        escolhidos.append((x, r, d, lista_o, o))
+    escolhidos.sort(key=lambda e: (e[4].partida or datetime.combine(e[2], datetime.min.time())))
+    com_hora = [e[4] for e in escolhidos if e[4].partida and e[4].chegada]
+    cen_ed = Cenario(com_hora) if com_hora else None
+    problemas = problemas_da_simulacao(escolhidos, rotas_lig, nomes)
+
+    if sorted(marcados) != sorted(sugeridos):
+        with st.container(border=True):
+            st.markdown("**✏️ Você alterou o roteiro**")
+            c1, c2 = st.columns([1, 3])
+            c1.metric("Total", brl(sum(e[4].preco for e in escolhidos)),
+                      delta=_diferenca(sum(e[4].preco for e in escolhidos) - cen.total) if cen else None,
+                      delta_color="inverse",
+                      help="A diferença é em relação ao roteiro escolhido acima.")
+            with c2:
+                mostrar_problemas(problemas, escolhidos)
+            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+            nome_g = c1.text_input("Nome para guardar", placeholder="Ex.: via Paris, volta 01/03", key="cal_nome")
+            if c2.button("💾 Guardar", disabled=not (nome_g.strip() and marcados), key="cal_guardar"):
+                arquivo = _sim_ler()
+                arquivo["salvas"][nome_g.strip()] = {
+                    "marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+                    "total": round(sum(e[4].preco for e in escolhidos), 2),
+                    "quando": datetime.now().isoformat(timespec="minutes")}
+                _sim_gravar(arquivo)
+                st.toast(f"Guardado: {nome_g.strip()} (em Simular viagem → Simulações salvas)", icon="💾")
+            if c3.button("↩️ Voltar", key="cal_voltar", help="Volta ao roteiro escolhido acima"):
+                st.session_state["cal_assinatura"] = None
+                st.rerun()
+            if c4.button("🧮 Detalhar", key="cal_detalhar", help="Abre no simulador para escolher o horário de cada voo"):
+                _sim_carregar({"marcados": marcados,
+                               "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida}})
+                st.session_state["sim_carregado"] = True
+                st.switch_page(PAGINAS["simulador"])
+
     sel = st.multiselect("Viagens no calendário", ids, default=ids, format_func=lambda i: nomes.get(i, i))
     meses = sorted({(d.year, d.month) for r in sel for d in op[r]} |
-                   ({(o.partida.year, o.partida.month) for o in cen.trechos} if cen else set()))
+                   ({(o.partida.year, o.partida.month) for o in cen_ed.trechos} if cen_ed else set()))
     if not meses:
         st.info("Escolha ao menos uma viagem.")
         return
-    for ano, mes in filtro_meses(meses, "cal_meses"):
-        st.markdown(f"#### {MESES[mes - 1].capitalize()} de {ano}")
-        st.markdown(calendario_html(ano, mes, op, sel, cen, nomes, voos, rotas_lig), unsafe_allow_html=True)
-    if cen:
-        st.caption("Azul ✈️ = voos do roteiro escolhido. O fundo mostra em que cidade você estaria em cada dia.")
+    html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
+                       + calendario_html(a, m, op, sel, cen_ed, nomes, voos, rotas_lig, clicavel=True,
+                                         problemas=problemas)
+                       for a, m in filtro_meses(meses, "cal_meses"))
+    novos = calendario_clicavel(html_cal, marcados, "cal_clicavel")
+    if sorted(novos) != sorted(marcados):
+        st.session_state["cal_marcados"] = novos
+        st.rerun()
+    st.caption("Azul ✈️ = voos do roteiro. ❌ vermelho = choque de horário. ⚠️ laranja = fora das ligações que você "
+               "marcou. O fundo mostra em que cidade você estaria em cada dia.")
 
 
 def campo_intervalo(chave: str, min_h: float, max_h: float | None) -> tuple[float, float | None]:
