@@ -789,7 +789,9 @@ def _pendentes() -> list[str]:
 def baixar_novidades() -> tuple[bool, str]:
     """Traz os commits do GitHub (preços novos) e abre o histórico criptografado."""
     from monitor.cofre import abrir
-    ok, saida = _cmd("git", "pull", "--rebase", "--autostash")
+    # merge (e não rebase): no SSD exFAT o macOS cria "._*" no meio do rebase e ele trava (visto em 21/11)
+    limpar_auxiliares()
+    ok, saida = _cmd("git", "pull", "--no-rebase", "--no-edit")
     if not ok:
         return False, saida
     abertos = abrir(RAIZ, "dados")
