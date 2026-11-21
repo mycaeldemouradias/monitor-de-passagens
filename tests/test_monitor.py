@@ -711,3 +711,58 @@ def test_horarios_com_e_sem_fuso_se_misturam(tmp_path):
     from monitor.models import Trecho
     t = Trecho(datetime.fromisoformat("2027-02-02T22:05:00-03:00"), datetime.fromisoformat("2027-02-03T01:00:00"))
     assert t.partida.tzinfo is None and t.chegada - t.partida == timedelta(hours=2, minutes=55)
+
+
+def test_aviso_nao_repete_se_o_resumo_falhar(tmp_path, monkeypatch):
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("geral: {resumo_diario_hora: 0}\nrotas:\n  - {id: r, origem: REC, destino: GRU, "
+                     "ida: '2099-01-10', preco_alvo: 500, fontes: [skiplagged]}\n", encoding="utf-8")
+
+    class Falsa:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c): return [Oferta(c, "skiplagged", 400.0)]
+        def fechar(self): pass
+
+    enviados = []
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Falsa())
+    monkeypatch.setattr(cli.notificacao, "enviar", lambda t: enviados.append(t) or {"telegram": "ok"})
+    monkeypatch.setattr(cli, "montar_resumo", lambda *a, **k: 1 / 0)  # resumo quebra
+    argv = ["--config", str(rotas), "--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")]
+    assert cli.main(argv) == 0 and cli.main(argv) == 0
+    assert sum("Passagem mais barata" in t for t in enviados) == 1  # o aviso saiu só uma vez
+
+
+def test_viagem_pausada_no_meio_da_rodada_nao_derruba(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("MONITOR_CHAVE", Fernet.generate_key().decode())
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("geral: {resumo_diario_hora: null}\nrotas:\n  - {id: r, origem: REC, destino: GRU, "
+                     "ida: '2099-01-10', fontes: [skiplagged]}\n", encoding="utf-8")
+
+    class Falsa:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c): return [Oferta(c, "skiplagged", 400.0)]
+        def fechar(self): pass
+
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Falsa())
+    base = ["--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")]
+    cli.main(base + ["--config", str(rotas), "--salvar-ofertas", str(tmp_path / "p.cripto")])
+    rotas.write_text(rotas.read_text().replace("fontes: [skiplagged]}", "fontes: [skiplagged], ativa: false}"))
+    assert cli.main(base + ["--config", str(rotas), "--fontes", "nenhuma",
+                            "--incluir-ofertas", str(tmp_path / "p.cripto")]) == 0
+
+
+def test_data_que_ja_passou_nao_esconde_conflito():
+    from monitor.roteiro import Opcao, conflito, sem_passado
+
+    def op(rota, dia, sai, chega):
+        return Opcao(rota, "A", "B", dia, None, 100, "s", "", "", datetime(2026, 1, 1), sai, chega)
+    agora = datetime(2027, 1, 5, 12, tzinfo=timezone.utc)
+    antes = {"a": {date(2025, 1, 1): [op("a", date(2025, 1, 1), datetime(2025, 1, 1, 8), datetime(2025, 1, 1, 10))],
+                   date(2027, 2, 9): [op("a", date(2027, 2, 9), datetime(2027, 2, 9, 8), datetime(2027, 2, 9, 13))]}}
+    b = op("b", date(2027, 2, 9), datetime(2027, 2, 9, 6), datetime(2027, 2, 9, 9))  # sai antes de 'a' chegar
+    assert conflito(antes, b, 3, None, {}) == ""                      # o voo de 2025 "encaixava"
+    assert "não encaixa" in conflito(sem_passado(antes, agora), b, 3, None, {})

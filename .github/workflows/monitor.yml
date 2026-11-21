@@ -52,8 +52,8 @@ jobs:
           cache: pip
       - name: Instalar dependências
         run: pip install -r requirements.txt
-      - name: Abrir o cofre (viagens)
-        run: python -m monitor.cofre abrir config
+      - name: Abrir o cofre (viagens e estado, para o rodízio)
+        run: python -m monitor.cofre abrir tudo
       - name: Buscar (parte ${{ matrix.parte }} de 6)
         run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/6 --salvar-ofertas parte-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
@@ -82,8 +82,8 @@ jobs:
           cache: pip
       - name: Instalar dependências
         run: pip install -r requirements.txt
-      - name: Abrir o cofre (viagens)
-        run: python -m monitor.cofre abrir config
+      - name: Abrir o cofre (viagens e estado, para o rodízio)
+        run: python -m monitor.cofre abrir tudo
       - name: Baixar as partes já feitas
         uses: actions/download-artifact@v4
         continue-on-error: true

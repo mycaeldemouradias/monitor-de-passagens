@@ -101,7 +101,7 @@ def gravar_voos(arq: Path, achadas: dict[str, list[Any]], coleta: datetime) -> N
                               "chegada": o.ida.chegada.isoformat() if o.ida else None,
                               "escalas": o.ida.conexoes_texto() if o.ida else ""} for o in ofertas]}
     # datas que já passaram saem do arquivo
-    hoje = coleta.date().isoformat()
+    hoje = hoje_recife(coleta).isoformat()
     dados = {k: v for k, v in dados.items() if v["ida"] >= hoje}
     arq.write_text(json.dumps(dados, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
@@ -120,6 +120,18 @@ def ler_voos(arq: Path) -> dict[str, dict[date, list[Opcao]]]:
                                coleta=datetime.fromisoformat(d["coleta"]), partida=_dt(v["partida"]),
                                chegada=_dt(v["chegada"]), escalas=v["escalas"]))
     return saida
+
+
+def hoje_recife(agora: datetime) -> date:
+    from zoneinfo import ZoneInfo
+    return (agora if agora.tzinfo else agora.replace(tzinfo=ZoneInfo("UTC"))).astimezone(
+        ZoneInfo("America/Recife")).date()
+
+
+def sem_passado(voos: dict[str, dict[date, Any]], agora: datetime) -> dict[str, dict[date, Any]]:
+    """Tira as datas que já passaram (um voo antigo não pode "encaixar" numa viagem futura)."""
+    hoje = hoje_recife(agora)
+    return {r: {d: v for d, v in dias.items() if d >= hoje} for r, dias in voos.items()}
 
 
 def todos_os_voos(melhores: dict[str, dict[date, Opcao]],

@@ -74,17 +74,21 @@ def conversas_do_bot(token: str) -> dict[str, dict]:
 
 
 def _whatsapp(texto: str) -> None:
-    r = requests.get(
-        "https://api.callmebot.com/whatsapp.php",
-        params={
-            "phone": os.environ["CALLMEBOT_PHONE"],
-            "apikey": os.environ["CALLMEBOT_APIKEY"],
-            "text": texto[:1500],
-        },
-        timeout=30,
-    )
+    try:
+        r = requests.get(
+            "https://api.callmebot.com/whatsapp.php",
+            params={
+                "phone": os.environ["CALLMEBOT_PHONE"],
+                "apikey": os.environ["CALLMEBOT_APIKEY"],
+                "text": texto[:1500],
+            },
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        # a mensagem de erro do requests traz o endereço, com o texto do aviso e o telefone
+        raise RuntimeError(f"CallMeBot: {type(e).__name__}") from None
     if r.status_code != 200 or "error" in r.text.lower()[:200]:
-        raise RuntimeError(f"CallMeBot respondeu {r.status_code}: {r.text[:300]}")
+        raise RuntimeError(f"CallMeBot respondeu {r.status_code}")
 
 
 ENVIADORES = {"telegram": _telegram, "whatsapp": _whatsapp}

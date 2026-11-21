@@ -16,6 +16,7 @@ LIMITES (importante):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -111,7 +112,8 @@ class SiteNavegador(Fonte):
         chave_modelo = "url_ida_volta" if c.ida_volta else "url_so_ida"
         modelo = self.cfg.get(chave_modelo)
         if not modelo:
-            log.info("%s não tem %s configurada; pulando %s", self.nome, chave_modelo, c.chave)
+            log.info("%s não tem %s configurada; pulando %s", self.nome, chave_modelo,
+                     "uma busca" if os.getenv("MONITOR_PRIVADO") == "1" else c.chave)
             return []
         url = montar_url(modelo, c)
         nav = _Navegador.obter()

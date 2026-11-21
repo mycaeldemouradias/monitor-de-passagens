@@ -26,7 +26,7 @@ from .fontes import FonteBloqueada, criar_fonte
 from .historico import Estado, Historico, agora
 from .models import Consulta, Oferta, Rota, oferta_de_dict, oferta_para_dict
 from .resumo import deve_mandar_resumo, marcar_resumo, montar_resumo
-from .roteiro import conflito, gravar_voos, ler_voos, opcao_de_oferta, opcoes, todos_os_voos
+from .roteiro import conflito, gravar_voos, ler_voos, opcao_de_oferta, opcoes, sem_passado, todos_os_voos
 from .regras import avaliar, brl, deve_reavisar
 
 log = logging.getLogger("monitor")
@@ -142,6 +142,9 @@ def executar(args: argparse.Namespace) -> int:
     # resultados das partes que rodaram em outros computadores do GitHub
     for arq in args.incluir_ofertas or []:
         parte = _ler_parte(Path(arq))
+        # viagem pausada/excluída enquanto as partes rodavam: os resultados dela são ignorados
+        parte["ofertas"] = [o for o in parte["ofertas"] if o.consulta.rota_id in rotas]
+        parte["voos"] = {k: v for k, v in parte.get("voos", {}).items() if v and v[0].consulta.rota_id in rotas}
         ofertas.extend(parte["ofertas"])
         achadas_por_busca.update(parte.get("voos", {}))
         tentativas += parte["tentativas"]
@@ -154,7 +157,7 @@ def executar(args: argparse.Namespace) -> int:
             for o in parte["ofertas"]:
                 estado.marcar_consulta(o.fonte, o.consulta.chave, inicio)
 
-    if not consultas_por_fonte and not ofertas:
+    if not consultas_por_fonte and not ofertas and not args.incluir_ofertas:
         log.warning("Nenhuma busca a fazer (rotas inativas ou todas as datas já passaram).")
         return 0
 
@@ -254,6 +257,8 @@ def executar(args: argparse.Namespace) -> int:
 
     alertas: list[tuple[Oferta, list[str]]] = []
     for chave, o in melhores.items():
+        if o.consulta.rota_id not in rotas:
+            continue
         motivos = avaliar(o, historico.precos(chave), rotas[o.consulta.rota_id], cfg.geral, inicio)
         if motivos and deve_reavisar(estado.ultimo_alerta(chave), o.preco, cfg.geral, inicio):
             alertas.append((o, motivos))
@@ -263,15 +268,18 @@ def executar(args: argparse.Namespace) -> int:
     # viagens ligadas ("depois de"): avisa se o voo não encaixa depois de nenhuma das anteriores
     todas = {r.id: r for r in cfg.rotas}
     nomes = {r.id: r.nome or r.id for r in cfg.rotas}
-    if any(todas[o.consulta.rota_id].depois_de for o, _ in alertas if o.consulta.rota_id in todas):
-        voos = _voos_atuais(historico.csv, dados / "voos.json", ofertas, achadas_por_busca, inicio)
-        for o, _ in alertas:
-            rota = todas.get(o.consulta.rota_id)
-            if rota and rota.depois_de:
-                aviso = conflito({a: voos.get(a, {}) for a in rota.depois_de}, opcao_de_oferta(o, inicio),
-                                 rota.intervalo_min_horas, rota.intervalo_max_horas, nomes)
-                if aviso:
-                    o.avisos.append("🔗 " + aviso)
+    try:
+        if any(todas[o.consulta.rota_id].depois_de for o, _ in alertas if o.consulta.rota_id in todas):
+            voos = _voos_atuais(historico.csv, dados / "voos.json", ofertas, achadas_por_busca, inicio)
+            for o, _ in alertas:
+                rota = todas.get(o.consulta.rota_id)
+                if rota and rota.depois_de:
+                    aviso = conflito({a: voos.get(a, {}) for a in rota.depois_de}, opcao_de_oferta(o, inicio),
+                                     rota.intervalo_min_horas, rota.intervalo_max_horas, nomes)
+                    if aviso:
+                        o.avisos.append("🔗 " + aviso)
+    except Exception as e:  # noqa: BLE001 — um erro aqui não pode impedir os avisos
+        log.error("Falha ao conferir as ligações entre viagens: %s", type(e).__name__)
 
     for o, motivos in alertas:
         texto = mensagem(o, motivos)
@@ -281,16 +289,24 @@ def executar(args: argparse.Namespace) -> int:
         envio = notificacao.enviar(texto)
         if any(v == "ok" for v in envio.values()):
             estado.registrar_alerta(o.consulta.chave, o.preco, inicio)
+            estado.salvar()  # já gravado: se algo falhar depois, o mesmo aviso não se repete
 
     if not args.simular:
         historico.registrar(ofertas, inicio)
-        gravar_voos(dados / "voos.json", achadas_por_busca, inicio)
+        estado.salvar()
+        try:
+            gravar_voos(dados / "voos.json", achadas_por_busca, inicio)
+        except Exception as e:  # noqa: BLE001
+            log.error("Falha ao guardar os voos do dia: %s", type(e).__name__)
         if deve_mandar_resumo(estado, cfg.geral, inicio):
-            texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio, cfg.rotas,
-                                  dados / "voos.json")
-            if any(v == "ok" for v in notificacao.enviar(texto).values()):
-                marcar_resumo(estado, inicio)
-                log.info("Resumo diário enviado.")
+            try:
+                texto = montar_resumo(historico.csv, [r for r in cfg.rotas if r.ativa], inicio, cfg.rotas,
+                                      dados / "voos.json")
+                if any(v == "ok" for v in notificacao.enviar(texto).values()):
+                    marcar_resumo(estado, inicio)
+                    log.info("Resumo diário enviado.")
+            except Exception as e:  # noqa: BLE001
+                log.error("Falha ao montar o resumo diário: %s", type(e).__name__)
         estado.salvar()
         (dados / "ultima_execucao.json").write_text(json.dumps({
             "data_hora_utc": inicio.isoformat(), "fontes": resumo,
@@ -317,7 +333,7 @@ def _voos_atuais(arq_csv: Path, arq_voos: Path, ofertas: list[Oferta], achadas: 
             novos.setdefault(x.rota_id, {}).setdefault(x.data, []).append(x)
     for rota, dias in novos.items():
         voos.setdefault(rota, {}).update(dias)
-    return voos
+    return sem_passado(voos, inicio)
 
 
 def _salvar_parte(arq: Path, ofertas: list[Oferta], resumo: dict, tentativas: int, falhas: int,

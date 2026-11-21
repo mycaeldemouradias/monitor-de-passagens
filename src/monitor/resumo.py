@@ -14,7 +14,7 @@ from .config import Geral
 from .historico import Estado
 from .models import Rota
 from .regras import brl
-from .roteiro import combinar, conflito, ler_voos, opcoes, todos_os_voos
+from .roteiro import combinar, conflito, ler_voos, opcoes, sem_passado, todos_os_voos
 
 FUSO = ZoneInfo("America/Recife")
 
@@ -48,7 +48,7 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list
                 linhas.append(l)
     hoje, ontem = agora - timedelta(hours=24), agora - timedelta(hours=48)
     por_id = {r.id: r for r in (todas or rotas)}
-    voos = todos_os_voos(opcoes(linhas), ler_voos(arq_voos) if arq_voos else {}) \
+    voos = sem_passado(todos_os_voos(opcoes(linhas), ler_voos(arq_voos) if arq_voos else {}), agora) \
         if any(r.depois_de for r in rotas) else {}
     nomes = {r.id: r.nome or r.id for r in por_id.values()}
     partes = [f"☀️ Resumo das passagens — {agora.astimezone(FUSO):%d/%m}",
