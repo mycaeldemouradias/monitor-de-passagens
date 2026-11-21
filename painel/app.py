@@ -25,6 +25,7 @@ from monitor.aeroportos import rotulo, todos as aeroportos  # noqa: E402
 from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, ler_pausas  # noqa: E402
 from monitor.models import DIAS  # noqa: E402
 from monitor.regras import brl  # noqa: E402
+from monitor.roteiro import Cenario, cenarios, opcoes  # noqa: E402
 from monitor.viagens import (consultas, criar_id, ler_viagens, salvar_pausas,  # noqa: E402
                              salvar_viagens)
 
@@ -450,6 +451,166 @@ def tela_viagens() -> None:
             st.caption("Google Flights: o plano gratuito permite ~8 buscas por dia no total. Quanto mais datas, "
                        f"menos vezes cada uma é atualizada. Skiplagged: {PARTES_SKIPLAGGED} computadores a cada 2h, "
                        f"até {PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada} datas por rodada.")
+
+
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro",
+         "novembro", "dezembro"]
+CORES_CIDADES = ["#dbeafe", "#fde68a", "#ddd6fe", "#fbcfe8", "#bbf7d0", "#fed7aa", "#cffafe", "#e5e7eb"]
+
+
+def cidade_curta(codigo: str) -> str:
+    nome = aeroportos().get(codigo, codigo)
+    return nome.split(" – ")[0].split(" · ")[0]
+
+
+def _quando(dt: datetime) -> str:
+    return f"{DIAS[dt.weekday()]} {dt:%d/%m %H:%M}"
+
+
+def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict) -> str:
+    import calendar
+    import html
+
+    # onde a pessoa está em cada dia (só quando há um roteiro escolhido)
+    local: dict[date, str] = {}
+    voos: dict[date, list[str]] = defaultdict(list)
+    cores: dict[str, str] = {}
+    if cen:
+        t = cen.trechos
+        for i, o in enumerate(t):
+            voos[o.partida.date()].append(o.rota_id)
+        for dest, de, ate in cen.estadias():
+            d = de.date()
+            while d <= ate.date():
+                local[d] = cidade_curta(dest)
+                d += timedelta(days=1)
+        local.setdefault(t[0].partida.date(), cidade_curta(t[0].origem))
+        local.setdefault(t[-1].chegada.date(), cidade_curta(t[-1].destino))
+        cidades = list(dict.fromkeys(local.values()))
+        # dias de voo: "Tampa → Minneapolis"; dias dentro de um voo longo: "em trânsito"
+        for o in t:
+            d = o.partida.date()
+            while d <= o.chegada.date():
+                if d == o.partida.date():
+                    local[d] = f"{cidade_curta(o.origem)} → {cidade_curta(o.destino)}"
+                elif d < o.chegada.date():
+                    local[d] = "✈️ em trânsito"
+                elif d not in local or local[d] == "✈️ em trânsito":
+                    local[d] = cidade_curta(o.destino)
+                d += timedelta(days=1)
+        for c in cidades:
+            cores[c] = CORES_CIDADES[len(cores) % len(CORES_CIDADES)]
+        for d, nome in local.items():
+            if "→" in nome:  # dia de voo: cor da cidade de chegada
+                cores.setdefault(nome, cores.get(nome.split(" → ")[1], "#e0e7ff"))
+        cores["✈️ em trânsito"] = "#e0e7ff"
+    mais_barato = {r: min(op[r].values(), key=lambda o: o.preco).data for r in sel if op.get(r)}
+
+    linhas = ['<table class="cal"><tr>' + "".join(f"<th>{d}</th>" for d in DIAS) + "</tr>"]
+    for semana in calendar.Calendar(firstweekday=0).monthdatescalendar(ano, mes):
+        linhas.append("<tr>")
+        for dia in semana:
+            fora = dia.month != mes
+            fundo = cores.get(local.get(dia, ""), "")
+            estilo = f' style="background:{fundo}"' if fundo and not fora else ""
+            cel = [f'<div class="num">{dia.day}</div>']
+            if not fora and dia in local:
+                marca = "" if local[dia].startswith("✈️") else "📍 "
+                cel.append(f'<div class="loc">{marca}{html.escape(local[dia])}</div>')
+            if not fora:
+                for r in sel:
+                    o = op.get(r, {}).get(dia)
+                    if not o:
+                        continue
+                    classes = "chip" + (" barato" if mais_barato.get(r) == dia else "")
+                    classes += " voo" if r in voos.get(dia, []) else ""
+                    icone = "✈️ " if r in voos.get(dia, []) else ("★ " if mais_barato.get(r) == dia else "")
+                    titulo = html.escape(f"{nomes.get(r, r)} · {o.fonte}" + (f" · sai {o.partida:%H:%M}" if o.partida else ""))
+                    cel.append(f'<div class="{classes}" title="{titulo}">{icone}{o.origem}→{o.destino} '
+                               f'<b>{html.escape(brl(o.preco))}</b></div>')
+            linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
+        linhas.append("</tr>")
+    linhas.append("</table>")
+    css = """<style>
+    table.cal{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
+    table.cal th{padding:6px;text-align:left;color:#555;border-bottom:2px solid #ddd}
+    table.cal td{vertical-align:top;height:92px;padding:4px;border:1px solid #e5e5e5;color:#222}
+    table.cal td.fora{background:#fafafa;color:#bbb}
+    .cal .num{font-weight:600;margin-bottom:2px}
+    .cal .loc{font-size:11px;font-weight:600;margin-bottom:2px}
+    .cal .chip{background:#f3f4f6;border-radius:6px;padding:2px 4px;margin:2px 0;line-height:1.25;overflow-wrap:anywhere}
+    .cal .chip.barato{background:#dcfce7;border:1px solid #16a34a}
+    .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
+    </style>"""
+    return css + "".join(linhas)
+
+
+def tela_calendario() -> None:
+    st.title("📅 Calendário e roteiros")
+    st.caption("Cada dia mostra as viagens com saída naquele dia e o preço mais recente encontrado. "
+               "★ verde = o dia mais barato daquela viagem.")
+    df = historico()
+    if df.empty:
+        sem_dados()
+        return
+    lista = viagens()
+    nomes = {v["id"]: nome_viagem(v) for v in lista}
+    op = opcoes(df.to_dict("records"))
+    ids = [v["id"] for v in lista if v["id"] in op]
+    if not ids:
+        sem_dados()
+        return
+    rotulo_v = lambda i: f"{nomes.get(i, i)} ({next(iter(op[i].values())).origem}→{next(iter(op[i].values())).destino})"
+    sel = st.multiselect("Viagens no calendário", ids, default=ids, format_func=rotulo_v)
+
+    cen = None
+    with st.container(border=True):
+        st.subheader("🧭 Montar roteiro")
+        st.caption("Escolha os trechos **na ordem da viagem** (ex.: Rio→Tampa, Tampa→Minneapolis, Minneapolis→Lisboa). "
+                   "O painel testa as datas e mostra só as combinações em que um voo sai depois que o anterior "
+                   "chegou, saindo da mesma cidade (JFK e LGA contam como Nova York). Usa o horário do voo mais "
+                   "barato de cada dia; preços sem horário (Kayak) e ida e volta ficam de fora.")
+        so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
+        trechos = st.multiselect("Trechos, na ordem", so_ida, format_func=rotulo_v, placeholder="Escolha 2 ou mais")
+        c1, c2 = st.columns(2)
+        folga = c1.number_input("Folga mínima entre um voo e outro (horas)", 1, 240, 3)
+        min_dias = c2.number_input("Ficar no mínimo (dias) em cada lugar", 0, 60, 0,
+                                   help="0 = pode seguir no mesmo dia, respeitando a folga.")
+        if len(trechos) >= 2:
+            cs = cenarios([op[t] for t in trechos], folga, min_dias, limite=10)
+            if not cs:
+                st.warning("Nenhuma combinação de datas encaixa com essas regras. Tente diminuir a folga ou os "
+                           "dias mínimos, ou confira se cada trecho sai da cidade onde o anterior chega.")
+            else:
+                def resumo_cen(i: int) -> str:
+                    c = cs[i]
+                    return f"{brl(c.total)} · " + " | ".join(f"{o.origem}→{o.destino} {o.partida:%d/%m}" for o in c.trechos)
+                i = st.radio("Cenários mais baratos (escolha um para ver no calendário)", range(len(cs)),
+                             format_func=resumo_cen)
+                cen = cs[i]
+                for a, prox in zip(cen.trechos, cen.trechos[1:] + [None]):
+                    onde = NOMES_FONTES.get(a.fonte, a.fonte) + (f" ({a.vendedor})" if a.vendedor else "")
+                    st.markdown(f"✈️ **{a.origem} → {a.destino}** · sai {_quando(a.partida)} · chega "
+                                f"{_quando(a.chegada)} · **{brl(a.preco)}** · {onde}"
+                                + (f" · [abrir]({a.link})" if a.link else ""))
+                    if prox:
+                        horas = (prox.partida - a.chegada).total_seconds() / 3600
+                        tempo = f"{horas / 24:.1f} dias".replace(".", ",") if horas >= 24 else f"{horas:.0f}h"
+                        st.caption(f"📍 Em {cidade_curta(a.destino)}: de {_quando(a.chegada)} a "
+                                   f"{_quando(prox.partida)} ({tempo})")
+                st.caption(f"Total do roteiro: **{brl(cen.total)}**. Preços da última coleta de cada data; podem "
+                           "ter mudado. Bilhetes separados: se um voo atrasar, o seguinte não é protegido.")
+
+    meses = sorted({(d.year, d.month) for r in sel for d in op[r]} |
+                   ({(o.partida.year, o.partida.month) for o in cen.trechos} if cen else set()))
+    if not meses:
+        st.info("Escolha ao menos uma viagem.")
+        return
+    inicial = (cen.trechos[0].partida.year, cen.trechos[0].partida.month) if cen else meses[0]
+    mes = st.selectbox("Mês", meses, index=meses.index(inicial), format_func=lambda m: f"{MESES[m[1] - 1]} de {m[0]}")
+    st.markdown(calendario_html(mes[0], mes[1], op, sel, cen, nomes), unsafe_allow_html=True)
+    if cen:
+        st.caption("Azul ✈️ = voo do roteiro escolhido. As cores de fundo mostram em que cidade você estaria.")
 
 
 def tela_historico() -> None:
@@ -884,6 +1045,7 @@ def tela_publicar() -> None:
 st.set_page_config(page_title="Monitor de Passagens", page_icon="✈️", layout="wide")
 PAGINAS = {
     "viagens": st.Page(tela_viagens, title="Minhas viagens", icon="✈️", default=True),
+    "calendario": st.Page(tela_calendario, title="Calendário e roteiros", icon="📅", url_path="calendario"),
     "historico": st.Page(tela_historico, title="Preços ao longo do tempo", icon="📈", url_path="historico"),
     "analise": st.Page(tela_analise, title="Melhor dia e horário", icon="🗓️", url_path="analise"),
     "buscas": st.Page(tela_buscas, title="Histórico de buscas", icon="🔎", url_path="buscas"),

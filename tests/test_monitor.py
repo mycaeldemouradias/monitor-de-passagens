@@ -554,3 +554,34 @@ def test_partes_em_varios_computadores_e_juntar(tmp_path, monkeypatch):
                             str(tmp_path / "parte1.cripto"), str(tmp_path / "parte2.cripto")]) == 0
     linhas = (tmp_path / "final" / "historico_precos.csv").read_text().strip().splitlines()
     assert len(linhas) == 6 and len(buscadas) == 5
+
+
+def test_roteiro_sem_sobreposicao_e_mesma_cidade():
+    from monitor.roteiro import cenarios, opcoes
+
+    def linha(rota, o, d, dia, preco, sai, chega, ts="2026-11-21T10:00:00+00:00", fonte="skiplagged"):
+        return {"data_hora_utc": ts, "chave": f"{rota}|{dia}", "rota_id": rota, "origem": o, "destino": d,
+                "ida": f"2027-02-{dia:02d}", "volta": "", "preco": str(preco), "fonte": fonte,
+                "ida_partida": sai, "ida_chegada": chega}
+
+    hist = [
+        linha("a", "GIG", "TPA", 7, 1800, "2027-02-07T17:00", "2027-02-09T13:25"),   # chega dia 9
+        linha("a", "GIG", "TPA", 8, 1700, "2027-02-08T10:00", "2027-02-08T22:00"),
+        linha("a", "GIG", "TPA", 8, 1600, "2027-02-08T10:00", "2027-02-08T22:00",
+              ts="2026-11-20T10:00:00+00:00"),                                         # leitura antiga: ignorada
+        linha("b", "TPA", "LGA", 9, 300, "2027-02-09T08:00", "2027-02-09T11:00"),
+        linha("b", "TPA", "LGA", 10, 400, "2027-02-10T08:00", "2027-02-10T11:00"),
+        linha("c", "JFK", "MSP", 10, 200, "2027-02-10T13:00", "2027-02-10T16:00"),     # JFK = mesma cidade que LGA
+        linha("c", "JFK", "MSP", 11, 150, "2027-02-11T09:00", "2027-02-11T12:00"),
+    ]
+    op = opcoes(hist)
+    assert op["a"][date(2027, 2, 8)].preco == 1700  # a mais recente vale
+    mesma = lambda x, y: x == y or {x, y} == {"LGA", "JFK"}
+    cs = cenarios([op["a"], op["b"], op["c"]], folga_h=3, mesma=mesma)
+    # a(8) chega 8/22h → b(9) 8h ok; b(9) chega 11h → c(10) ok e c(11) ok; a(7) chega 9/13h25 → só b(10)
+    totais = [(c.total, [o.data.day for o in c.trechos]) for c in cs]
+    assert totais[0] == (2150, [8, 9, 11])
+    assert (2350, [7, 10, 11]) in totais and (2300, [8, 10, 10]) not in totais  # 8/10: só 2h de folga and all(d != [7, 9, 10] for _, d in totais)
+    assert cenarios([op["a"], op["b"], op["c"]], folga_h=3, min_dias=2, mesma=mesma) == []
+    estadia = cs[0].estadias()[0]
+    assert estadia[0] == "TPA" and estadia[1].day == 8 and estadia[2].day == 9

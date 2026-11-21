@@ -101,6 +101,23 @@ def todos(caminho: Path = CSV_PADRAO) -> dict[str, str]:
     return fav | {c: n for c, n in rotulos.items() if c not in fav}
 
 
+@lru_cache(maxsize=4)
+def _cidades(caminho: Path = CSV_PADRAO) -> dict[str, str]:
+    if not caminho.exists():
+        return {}
+    with open(caminho, newline="", encoding="utf-8") as f:
+        return {r["Código IATA"]: f"{r['Cidade'].split(' (')[0].strip().lower()}|{r['País']}" for r in csv.DictReader(f)
+                if r.get("Código IATA")}
+
+
+def mesma_cidade(a: str, b: str) -> bool:
+    """JFK e LGA (Nova York), CDG e ORY (Paris)…: dá para chegar num e sair do outro."""
+    if a == b:
+        return True
+    ca, cb = _cidades().get(a), _cidades().get(b)
+    return bool(ca) and ca == cb
+
+
 def existe(codigo: str, caminho: Path = CSV_PADRAO) -> bool:
     """True se o código está na lista. Sem a lista (arquivo ausente), não bloqueia."""
     if not caminho.exists():
