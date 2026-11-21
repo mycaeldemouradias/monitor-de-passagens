@@ -92,7 +92,7 @@ def _rota(bruta: dict[str, Any], geral: Geral) -> Rota:
         ativa=bool(bruta.get("ativa", True)),
         nome=str(bruta.get("nome") or ""),
         depois_de=str(bruta.get("depois_de") or ""),
-        intervalo_min_horas=float(bruta.get("intervalo_min_horas", 3)),
+        intervalo_min_horas=float(bruta.get("intervalo_min_horas") or 3),
     )
 
 

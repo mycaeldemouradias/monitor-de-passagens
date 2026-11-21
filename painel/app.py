@@ -272,10 +272,18 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
 
     c1, c2, c3 = st.columns(3)
     adultos = c1.number_input("Adultos", 1, 9, value=int(v.get("adultos", 1)), key=k + "_adultos")
-    alvo = c2.number_input("Me avise se ficar abaixo de (R$)", 0, 100_000, step=50, key=k + "_alvo",
-                           value=int(v.get("preco_alvo") or 0),
-                           help="0 = sem preço-alvo. Os outros avisos (menor já visto e queda) continuam valendo: "
-                                "basta UMA regra para avisar. Na ida e volta, é o preço total.")
+    with c2:
+        sem_ref = st.checkbox("Ainda não sei um valor de referência", key=k + "_semref",
+                              value=not v.get("preco_alvo") and not nova,
+                              help="Marque se você ainda não sabe quanto essa passagem costuma custar.")
+        if sem_ref:
+            alvo = 0
+            st.caption("Sem problema: você será avisado quando o preço **cair** (novo menor preço ou queda abaixo "
+                       "da média) e recebe o resumo diário. Quando tiver uma ideia de valor, volte aqui.")
+        else:
+            alvo = st.number_input("Me avise se ficar abaixo de (R$)", 1, 100_000, step=50, key=k + "_alvo",
+                                   value=int(v.get("preco_alvo") or 1000),
+                                   help="Basta UMA regra para avisar. Na ida e volta, é o preço total.")
     queda = c3.number_input("…ou se cair este % abaixo da média", 5, 80, key=k + "_queda",
                             value=int(v.get("queda_pct") or g.queda_pct_padrao))
     referencia_preco(v.get("id"))
@@ -539,7 +547,7 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
         for dia in semana:
             fora = dia.month != mes
             fundo = cores.get(local.get(dia, ""), "")
-            estilo = f' style="background:{fundo}"' if fundo and not fora else ""
+            estilo = f' style="background:{fundo};color:#111827"' if fundo and not fora else ""
             cel = [f'<div class="num">{dia.day}</div>']
             if not fora and dia in local:
                 marca = "" if local[dia].startswith("✈️") else "📍 "
@@ -560,19 +568,25 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                         icone = "⚠️ " + icone
                         titulo += " · ⚠️ " + aviso
                     titulo = html.escape(titulo)
+                    hora = ""
+                    if o.partida and o.chegada:
+                        dias = (o.chegada.date() - o.partida.date()).days
+                        hora = (f'<span class="hora">sai {o.partida:%H:%M} · chega {o.chegada:%H:%M}'
+                                + (f" ({o.chegada:%d/%m})" if dias else "") + "</span>")
                     cel.append(f'<div class="{classes}" title="{titulo}">{icone}{o.origem}→{o.destino} '
-                               f'<b>{html.escape(brl(o.preco))}</b></div>')
+                               f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
             linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
         linhas.append("</tr>")
     linhas.append("</table>")
     css = """<style>
-    table.cal{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
-    table.cal th{padding:6px;text-align:left;color:#555;border-bottom:2px solid #ddd}
-    table.cal td{vertical-align:top;height:92px;padding:4px;border:1px solid #e5e5e5;color:#222}
-    table.cal td.fora{background:#fafafa;color:#bbb}
+    table.cal{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px;background:#ffffff;color:#111827}
+    table.cal th{padding:6px;text-align:left;color:#111827;background:#f3f4f6;border-bottom:2px solid #d1d5db}
+    table.cal td{vertical-align:top;height:92px;padding:4px;border:1px solid #d1d5db;color:#111827;background:#ffffff}
+    table.cal td.fora{background:#f3f4f6;color:#9ca3af}
+    .cal .hora{font-size:10.5px;opacity:.85;display:block}
     .cal .num{font-weight:600;margin-bottom:2px}
     .cal .loc{font-size:11px;font-weight:600;margin-bottom:2px}
-    .cal .chip{background:#f3f4f6;border-radius:6px;padding:2px 4px;margin:2px 0;line-height:1.25;overflow-wrap:anywhere}
+    .cal .chip{color:#111827;background:#f3f4f6;border-radius:6px;padding:2px 4px;margin:2px 0;line-height:1.25;overflow-wrap:anywhere}
     .cal .chip.barato{background:#dcfce7;border:1px solid #16a34a}
     .cal .chip.voo{background:#1d4ed8;color:#fff;border:none}
     .cal .chip.conflito{border:1px dashed #dc2626}
@@ -628,16 +642,23 @@ def tela_calendario() -> None:
             st.caption("Usa o intervalo mínimo que você marcou em cada ligação.")
         else:
             trechos = st.multiselect("Trechos, na ordem", so_ida, format_func=rotulo_v, placeholder="Escolha 2 ou mais")
-        c1, c2 = st.columns(2)
-        folga = c1.number_input("Folga mínima entre um voo e outro (horas)", 1, 240, 3, disabled=folgas is not None)
-        min_dias = c2.number_input("Ficar no mínimo (dias) em cada lugar", 0, 60, 0,
-                                   help="0 = pode seguir no mesmo dia, respeitando a folga.")
+            if len(trechos) >= 2:
+                st.markdown("**Intervalo mínimo em cada parada** (cada lugar tem o seu)")
+                folgas = []
+                for a, b in zip(trechos, trechos[1:]):
+                    oa = next(iter(op[a].values()))
+                    c1, c2 = st.columns([3, 1])
+                    valor = c1.number_input(f"Em {cidade_curta(oa.destino)}: entre {nomes.get(a, a)} e {nomes.get(b, b)}",
+                                            1, 999, 3, key=f"folga_{a}_{b}")
+                    unidade = c2.radio("em", ["horas", "dias"], horizontal=True, key=f"unid_{a}_{b}")
+                    folgas.append(float(valor) * (24 if unidade == "dias" else 1))
+        min_dias = 0
         if len(trechos) >= 2:
-            cs = cenarios([op[t] for t in trechos], folgas or folga, min_dias, limite=10,
-                          mesma=None if folgas is not None else mesma_cidade)
+            ligado = modo == "Pelas ligações que marquei"
+            cs = cenarios([op[t] for t in trechos], folgas, min_dias, limite=10, mesma=None if ligado else mesma_cidade)
             if not cs:
-                st.warning("Nenhuma combinação de datas encaixa com essas regras. Tente diminuir a folga ou os "
-                           "dias mínimos, ou confira se cada trecho sai da cidade onde o anterior chega.")
+                st.warning("Nenhuma combinação de datas encaixa com esses intervalos. Tente diminuir algum "
+                           "intervalo, ou confira se cada trecho sai da cidade onde o anterior chega.")
             else:
                 def resumo_cen(i: int) -> str:
                     c = cs[i]

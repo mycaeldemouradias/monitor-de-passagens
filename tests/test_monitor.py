@@ -639,3 +639,17 @@ def test_viagens_ligadas_encaixe_e_conflito(tmp_path):
     assert any("círculo" in e for e in validar([{**base, "id": "x", "depois_de": "y"},
                                                 {**base, "id": "y", "depois_de": "x"}]))
     assert any("não existe" in e for e in validar([{**base, "id": "x", "depois_de": "z"}]))
+
+
+def test_viagem_sem_ligacao_vinda_do_formulario_salva(tmp_path):
+    """O formulário manda depois_de/intervalo vazios (None) quando não há ligação."""
+    from monitor.viagens import consultas, salvar_viagens, validar
+
+    v = {"id": "x", "nome": "REC-RJ", "origem": "REC", "destino": "GIG", "ida": {"de": "2099-02-02", "ate": "2099-02-04"},
+         "adultos": 1, "preco_alvo": None, "queda_pct": 10, "fontes": ["skiplagged"],
+         "depois_de": None, "intervalo_min_horas": None, "volta": None, "duracao_dias": None}
+    assert validar([v]) == [] and len(consultas(v)) == 3
+    arq = tmp_path / "rotas.yaml"
+    arq.write_text("rotas: []\n", encoding="utf-8")
+    salvar_viagens(arq, [v])
+    assert "intervalo_min_horas" not in arq.read_text(encoding="utf-8")
