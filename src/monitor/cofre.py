@@ -139,6 +139,17 @@ def abrir(raiz: Path = RAIZ, parte: str = "tudo") -> list[str]:
     return abertos
 
 
+def pendentes(raiz: Path = RAIZ) -> list[str]:
+    """Arquivos de configuração mudados no Mac e ainda não criptografados (= não publicados)."""
+    f = _fernet()
+    mudados = []
+    for nome in SIMPLES["config"]:
+        legivel, cripto = raiz / nome, raiz / (nome + EXT)
+        if legivel.exists() and (not cripto.exists() or _ler(cripto, f) != legivel.read_bytes()):
+            mudados.append(nome)
+    return mudados
+
+
 def nova_chave(env: Path = RAIZ / ".env") -> bool:
     """Cria a MONITOR_CHAVE no .env, se ainda não existir. Nunca mostra a chave."""
     texto = env.read_text(encoding="utf-8") if env.exists() else ""

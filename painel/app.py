@@ -148,7 +148,8 @@ def historico() -> pd.DataFrame:
 def sem_dados() -> None:
     st.info(
         "Ainda não há preços guardados.\n\n"
-        "O histórico começa a encher quando o monitor estiver rodando sozinho no GitHub (etapa 7). "
+        "O histórico enche conforme o monitor roda no GitHub (a cada 2h). Para trazer os preços para cá, use "
+        "**⬇️ Baixar preços novos** na tela **Salvar e publicar**. "
         "Os testes da tela **Testar uma viagem** não entram no histórico."
     )
 
@@ -581,7 +582,7 @@ def alternar_fonte(fonte: str, chave: str) -> None:
 
 def tela_parar() -> None:
     st.title("⏸️ Pausar e parar buscas")
-    st.caption("As mudanças valem a partir da próxima rodada do monitor (depois de publicar no GitHub).")
+    st.caption("As mudanças valem a partir da próxima rodada do monitor, depois de publicar (tela Salvar e publicar).")
     lista = viagens()
 
     st.subheader("Viagens")
@@ -619,9 +620,14 @@ def tela_parar() -> None:
                    f"{geral().pausa_apos_bloqueio_horas:g}h sozinho.)")
 
     st.subheader("Parar uma execução que está rodando agora")
-    st.info("Fica disponível depois da etapa 7 (publicar no GitHub). Vai precisar de uma chave de acesso do "
-            "GitHub guardada só no seu Mac.")
-    st.button("⏹️ Parar agora", disabled=True)
+    rodando = [r for r in execucoes(5) if r["status"] in ("in_progress", "queued")]
+    if not rodando:
+        st.caption("Nenhuma execução rodando no GitHub agora.")
+    for r in rodando:
+        quando = pd.Timestamp(r["createdAt"]).tz_convert(FUSO)
+        if st.button(f"⏹️ Parar agora a execução das {quando:%H:%M}", key=f"parar_{r['databaseId']}"):
+            ok, saida = _cmd("gh", "run", "cancel", str(r["databaseId"]), "--repo", REPO, timeout=30)
+            (st.success if ok else st.error)("Pedido de parada enviado." if ok else saida)
 
     ultima = DADOS / "ultima_execucao.json"
     if ultima.exists():
@@ -704,13 +710,103 @@ def tela_testar() -> None:
         st.code("\n".join(saida) or "(vazio)")
 
 
+REPO = "mycaeldemouradias/monitor-de-passagens"
+
+
+def _cmd(*args: str, timeout: int = 120) -> tuple[bool, str]:
+    """Roda git/gh na pasta do projeto. Devolve (deu_certo, saída)."""
+    try:
+        r = subprocess.run(list(args), cwd=RAIZ, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def _pendentes() -> list[str]:
+    try:
+        from monitor.cofre import pendentes
+        return pendentes(RAIZ)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def baixar_novidades() -> tuple[bool, str]:
+    """Traz os commits do GitHub (preços novos) e abre o histórico criptografado."""
+    from monitor.cofre import abrir
+    ok, saida = _cmd("git", "pull", "--rebase", "--autostash")
+    if not ok:
+        return False, saida
+    abertos = abrir(RAIZ, "dados")
+    st.cache_data.clear()
+    return True, f"{len(abertos)} arquivo(s) de dados atualizados."
+
+
+def publicar() -> tuple[bool, str]:
+    from monitor.cofre import fechar
+    mudaram = fechar(RAIZ, "config")
+    if mudaram:
+        ok, saida = _cmd("git", "add", *mudaram)
+        if not ok:
+            return False, saida
+        ok, saida = _cmd("git", "commit", "-m", "viagens: atualizadas pelo painel")
+        if not ok:
+            return False, saida
+    ok, saida = baixar_novidades()
+    if not ok:
+        return False, saida
+    ok, saida = _cmd("git", "push")
+    if not ok:
+        return False, saida
+    return True, "Publicado." if mudaram else "Não havia mudanças nas viagens; os preços novos foram baixados."
+
+
+def execucoes(limite: int = 8) -> list[dict]:
+    ok, saida = _cmd("gh", "run", "list", "--repo", REPO, "--limit", str(limite), "--json",
+                     "databaseId,status,conclusion,createdAt,event,url,displayTitle", timeout=30)
+    return json.loads(saida) if ok and saida.startswith("[") else []
+
+
 def tela_publicar() -> None:
     st.title("☁️ Salvar e publicar")
     st.success("Tudo o que você muda no painel já fica **salvo no Mac** na hora.")
     if not (RAIZ / ".git").exists():
-        st.info("**Publicar no GitHub** fica disponível depois da etapa 7. Aí este botão vai buscar as novidades "
-                "do GitHub (como os preços novos), juntar com as suas mudanças e enviar tudo, sem comandos.")
-    st.button("☁️ Publicar no GitHub", type="primary", disabled=True)
+        st.info("O projeto ainda não está ligado ao GitHub.")
+        return
+    pend = _pendentes()
+    if pend:
+        st.warning("Você tem mudanças **ainda não enviadas** ao GitHub (viagens ou pausas). "
+                   "O monitor no GitHub só vê as mudanças depois de publicar.")
+    else:
+        st.caption("Nenhuma mudança de viagens esperando para ser enviada.")
+    c1, c2 = st.columns(2)
+    if c1.button("☁️ Publicar no GitHub", type="primary", disabled=not pend,
+                 help="Criptografa suas viagens, envia ao GitHub e já baixa os preços novos."):
+        with st.spinner("Publicando…"):
+            ok, msg = publicar()
+        (st.success if ok else st.error)(msg if ok else "Não consegui publicar. Mostre isto ao Claude:\n\n" + msg)
+    if c2.button("⬇️ Baixar preços novos do GitHub",
+                 help="Traz o histórico mais recente (criptografado) e abre aqui no Mac para os gráficos."):
+        with st.spinner("Baixando…"):
+            ok, msg = baixar_novidades()
+        (st.success if ok else st.error)(msg if ok else "Não consegui baixar. Mostre isto ao Claude:\n\n" + msg)
+
+    st.subheader("Últimas execuções no GitHub")
+    runs = execucoes()
+    if not runs:
+        st.caption("Não consegui consultar o GitHub agora (ou ainda não houve execuções).")
+        return
+    nomes = {"completed": "terminou", "in_progress": "rodando", "queued": "na fila"}
+    resultados = {"success": "✅ ok", "failure": "❌ falhou", "cancelled": "⏹️ parada", "": ""}
+    tabela = pd.DataFrame([{
+        "Quando": pd.Timestamp(r["createdAt"]).tz_convert(FUSO).tz_localize(None),
+        "Tipo": "automática" if r["event"] == "schedule" else "manual",
+        "Situação": nomes.get(r["status"], r["status"]),
+        "Resultado": resultados.get(r.get("conclusion") or "", r.get("conclusion")),
+        "Detalhes": r["url"],
+    } for r in runs])
+    st.dataframe(tabela, hide_index=True, use_container_width=True, column_config={
+        "Quando": st.column_config.DatetimeColumn(format="DD/MM HH:mm"),
+        "Detalhes": st.column_config.LinkColumn(display_text="abrir no GitHub")})
 
 
 # ----------------------------------------------------------------- navegação
@@ -732,7 +828,10 @@ def fechar_painel() -> None:
 
 
 with st.sidebar:
-    st.caption("Monitor de Passagens · as mudanças ficam salvas no Mac; publicar no GitHub chega na etapa 7.")
+    st.caption("Monitor de Passagens · as mudanças ficam salvas no Mac na hora.")
+    if (RAIZ / ".git").exists() and _pendentes():
+        st.warning("Há mudanças não publicadas.")
+        st.page_link(PAGINAS["publicar"], label="Publicar agora", icon="☁️")
     if st.button("⏻ Fechar painel", help="Desliga o painel. Para abrir de novo, use o atalho \"Abrir painel\"."):
         fechar_painel()
         st.success("Painel fechado. Pode fechar esta aba do navegador.")
