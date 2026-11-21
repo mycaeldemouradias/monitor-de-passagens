@@ -646,6 +646,31 @@ def _escolher_cenario(cs: list[Cenario], chave: str) -> Cenario:
     return cs[i]
 
 
+def ligacoes_impossiveis(rotas: list, voos: dict, nomes: dict) -> list[str]:
+    from monitor.roteiro import _intervalo_txt, _usaveis, combinar
+    saida = []
+    por = {r.id: r for r in rotas if r.ativa}
+    for r in por.values():
+        for a in r.depois_de:
+            va, vb = _usaveis(voos.get(a, {})), _usaveis(voos.get(r.id, {}))
+            if a not in por or not va or not vb:
+                continue
+            if combinar([va, vb], [(r.intervalo_min_horas, r.intervalo_max_horas)], 1):
+                continue
+            chegada, saida_b = min(o.chegada for o in va), max(o.partida for o in vb)
+            if saida_b <= chegada:
+                motivo = (f"as datas de **{nomes.get(r.id)}** ({min(o.data for o in vb):%d/%m/%Y} a "
+                          f"{max(o.data for o in vb):%d/%m/%Y}) são antes da chegada de **{nomes.get(a)}** "
+                          f"({chegada:%d/%m/%Y}). Será que a data foi escolhida errada?")
+            else:
+                motivo = (f"nenhum voo de **{nomes.get(r.id)}** sai {_intervalo_txt(r.intervalo_min_horas, r.intervalo_max_horas)} "
+                          f"depois de **{nomes.get(a)}** chegar")
+                if r.intervalo_max_horas and r.intervalo_max_horas < 24:
+                    motivo += f" (o máximo está em {r.intervalo_max_horas:g} **horas**; era para ser dias?)"
+            saida.append(motivo)
+    return saida
+
+
 def tela_calendario() -> None:
     from monitor.roteiro import combinar, ler_voos, roteiros_pelas_ligacoes, todos_os_voos
     st.title("📅 Calendário e roteiros")
@@ -688,6 +713,14 @@ def tela_calendario() -> None:
             else:
                 cen = _escolher_cenario(cs, "cen_lig")
                 _mostrar_cenario(cen, nomes)
+
+    problemas = ligacoes_impossiveis(rotas, voos, nomes)
+    if problemas:
+        with st.container(border=True):
+            st.markdown("**⚠️ Ligações que nunca encaixam** (com os voos encontrados até agora)")
+            for p in problemas:
+                st.markdown(f"- {p}")
+            st.caption("Corrija em Minhas viagens (✏️ → 🔗). Enquanto isso, esses caminhos ficam fora dos roteiros.")
 
     with st.expander("Montar um roteiro à mão (sem usar as ligações)"):
         so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
