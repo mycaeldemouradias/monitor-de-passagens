@@ -171,10 +171,17 @@ def executar(args: argparse.Namespace) -> int:
                     bloqueios_seguidos += 1
                     log.warning("%s", e)
                     if bloqueios_seguidos >= 2:
-                        horas = cfg.geral.pausa_apos_bloqueio_horas
-                        log.warning("%s bloqueou 2 vezes seguidas; descansa %gh.", nome_fonte, horas)
-                        if not args.simular:
-                            estado.pausar(nome_fonte, inicio + timedelta(hours=horas))
+                        if os.getenv("GITHUB_ACTIONS") == "true":
+                            # no GitHub cada rodada usa outro computador (outro IP): um bloqueio agora não
+                            # diz nada sobre a próxima. Medido em 21/11/2026: 1 bloqueio em 11 computadores.
+                            log.warning("%s bloqueou 2 vezes seguidas; para nesta rodada e tenta na próxima.",
+                                        nome_fonte)
+                        else:
+                            # no Mac o IP é o da casa: insistir pode piorar o bloqueio
+                            horas = cfg.geral.pausa_apos_bloqueio_horas
+                            log.warning("%s bloqueou 2 vezes seguidas; descansa %gh.", nome_fonte, horas)
+                            if not args.simular:
+                                estado.pausar(nome_fonte, inicio + timedelta(hours=horas))
                         break
                     continue
                 except Exception as e:  # noqa: BLE001 — uma busca falhar não para as outras

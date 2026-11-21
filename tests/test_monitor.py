@@ -476,3 +476,24 @@ def test_cotacao_usa_reserva_quando_a_primeira_recusa(monkeypatch):
     assert base.cotacao_para_brl("USD") == 5.9
     assert base.cotacao_para_brl("USD") == 5.9 and len(urls) == 2  # 2ª vez vem do cache
     base.cotacao_para_brl.cache_clear()
+
+
+def test_no_github_bloqueio_nao_pausa_a_fonte(tmp_path, monkeypatch):
+    from monitor.fontes import FonteBloqueada
+    from monitor.historico import Estado
+
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("rotas:\n  - {id: r, origem: REC, destino: GRU, ida: {de: '2099-01-10', ate: '2099-01-12'}, "
+                     "fontes: [skiplagged]}\n", encoding="utf-8")
+
+    class Bloqueada:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c): raise FonteBloqueada("403")
+        def fechar(self): pass
+
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Bloqueada())
+    monkeypatch.setattr(cli.notificacao, "enviar", lambda t: {})
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    cli.main(["--config", str(rotas), "--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")])
+    assert Estado(tmp_path / "d").pausada_ate("skiplagged") is None
