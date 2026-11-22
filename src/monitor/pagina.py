@@ -24,10 +24,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from .calendario import MESES, _quando, calendario_html, cidade_curta, noites_do_calendario
-from .hospedagem import com_hospedagem, ler_config, ler_precos, link_com_datas, quarto
+from .hospedagem import ler_config, ler_precos, link_com_datas, quarto
 from .config import CONFIG_PADRAO, Geral, _rota
 from .regras import brl
-from .roteiro import Cenario, hoje_recife, ler_voos, opcoes, roteiros_pelas_ligacoes, todos_os_voos
+from .roteiro import Cenario, hoje_recife, ler_voos, opcoes, todos_os_voos
 from .viagens import consultas, ler_viagens
 
 RAIZ = Path(__file__).resolve().parents[2]
@@ -131,27 +131,11 @@ def conteudo(config: Path = CONFIG_PADRAO, dados: Path = RAIZ / "data", agora: d
     partes.append('<h2>💰 Menor preço de cada viagem</h2><div class="rolar"><table class="precos"><tr><th>Viagem</th>'
                   "<th>Preço</th><th>Data</th><th>Onde</th></tr>" + "".join(linhas_t) + "</table></div>")
 
-    # roteiros pelas ligações
-    cenarios: list[Cenario | None] = []
+    # as ligações servem só para avisar (choque / estadia mínima): o site não monta roteiros sozinho
     cfg = ler_config(config.parent / "hospedagens.yaml")
     precos = ler_precos(dados / "hospedagens.json")["precos"]
     rts: list = []
-    if any(r.depois_de for r in rotas):
-        cenarios, _ = roteiros_pelas_ligacoes(rotas, voos, limite=40 if cfg else N_ROTEIROS)
-        if cfg:  # ordena por voos + hospedagem sugerida
-            adultos = {v["id"]: max(int(v.get("adultos") or 1), 1) for v in lista}
-            rts = com_hospedagem(cenarios, cfg, precos, adultos=adultos)[:N_ROTEIROS]
-            cenarios = [rt.cenario for rt in rts]
-    if cenarios:
-        botoes = "".join(f'<button class="aba{" ativa" if i == 0 else ""}" data-i="{i}">{i + 1}º · '
-                         f'{brl(rts[i].total) + " por pessoa" if rts else brl(c.total)}</button>' for i, c in enumerate(cenarios))
-        detalhes = "".join(f'<div class="cen" data-i="{i}"{"" if i == 0 else " hidden"}>'
-                           f'{_roteiro_html(c, nomes, rts[i] if rts else None)}</div>' for i, c in enumerate(cenarios))
-        partes.append(f'<h2>🧭 Roteiros mais baratos</h2><p class="nota">Montados pelas ligações das viagens'
-                      + (", somando a hospedagem sugerida" if rts else "")
-                      + f'. Escolha um para ver no calendário.</p><div class="abas">{botoes}</div>{detalhes}')
-    else:
-        cenarios = [None]
+    cenarios: list[Cenario | None] = [None]
 
     # calendário (um por roteiro; o fundo mostra em que cidade você estaria)
     if ids:

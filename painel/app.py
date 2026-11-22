@@ -85,6 +85,29 @@ def nome_viagem(v: dict) -> str:
     return v.get("nome") or f"{v.get('origem')} → {v.get('destino')}"
 
 
+def nomes_unicos(lista: list[dict]) -> dict[str, str]:
+    """{id: nome}, sem nomes repetidos. As listas de escolha do Streamlit guardam o NOME: duas viagens com o
+    mesmo nome (ex.: "CDG → OPO" de 16 a 18/02 e de 08 a 22/02) viravam a mesma depois do 1º clique, e uma
+    sumia do calendário. Repetido ganha as datas; se ainda repetir, o código da viagem."""
+    base = {v["id"]: nome_viagem(v) for v in lista}
+    contagem = defaultdict(int)
+    for n in base.values():
+        contagem[n] += 1
+    nomes = {}
+    for v in lista:
+        n = base[v["id"]]
+        if contagem[n] > 1:
+            try:
+                n += f" ({resumo_datas(v['ida'])})"
+            except Exception:  # noqa: BLE001
+                pass
+        nomes[v["id"]] = n
+    contagem = defaultdict(int)
+    for n in nomes.values():
+        contagem[n] += 1
+    return {i: (n + f" · {i}" if contagem[n] > 1 else n) for i, n in nomes.items()}
+
+
 _SUFIXO_PAR = re.compile(r" \([A-Z]{3} → [A-Z]{3}\)$")
 
 
@@ -192,7 +215,7 @@ def descricao_busca(linha) -> str:
 
 def nomes_por_id() -> dict[str, str]:
     try:
-        return {v["id"]: nome_viagem(v) for v in viagens()}
+        return nomes_unicos(viagens())
     except Exception:  # noqa: BLE001
         return {}
 
@@ -350,15 +373,15 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
 
     st.markdown("**🔗 Ligação com outras viagens** (opcional)")
     outras = [x["id"] for x in lista if x.get("id") not in sib_ids]
-    nomes_o = {x["id"]: nome_viagem(x) for x in lista}
+    nomes_o = nomes_unicos(lista)
     atuais_dep = v.get("depois_de") or []
     atuais_dep = [atuais_dep] if isinstance(atuais_dep, str) else atuais_dep
     depois_de = st.multiselect("Esta viagem acontece depois de **qualquer uma** destas", outras, key=k + "_dep",
                                default=[x for x in atuais_dep if x in outras], format_func=lambda i: nomes_o.get(i, i),
                                placeholder="(nenhuma)",
                                help="Ex.: Rio→Tampa depois de REC→Galeão OU REC→Santos Dumont (vale a que você "
-                                    "comprar). O monitor avisa quando o voo mais barato de um dia não encaixa, e "
-                                    "monta os roteiros possíveis no Calendário.")
+                                    "comprar). Serve só para AVISAR: quando você marcar voos que se chocam ou que "
+                                    "não respeitam o intervalo (estadia mínima). Não esconde nenhum voo do calendário.")
     int_min = int_max = None
     if depois_de:
         st.caption("Intervalo entre a **chegada** daquela viagem e a **saída** desta:")
@@ -964,7 +987,7 @@ def tela_simulador() -> None:
         sem_dados()
         return
     lista = viagens()
-    nomes = {v["id"]: nome_viagem(v) for v in lista}
+    nomes = nomes_unicos(lista)
     op, voos = dados_atuais(df, lista)
     if not op:
         sem_dados()
@@ -1141,20 +1164,19 @@ def tela_simulador() -> None:
     else:
         st.success("Nenhum voo se sobrepõe.")
     if fora_regra:
-        st.warning(f"{fora_regra} trecho(s) fora das ligações que você marcou nas viagens (não é choque de horário). "
-                   "Por isso esta simulação "
-                   "pode sair mais barata que os \"Roteiros possíveis\", que só usam combinações dentro das ligações.")
+        st.warning(f"{fora_regra} trecho(s) fora das ligações que você marcou nas viagens (não é choque de horário): "
+                   "o intervalo entre os voos é menor ou maior que o combinado (estadia mínima/máxima).")
 
 
 def tela_calendario() -> None:
-    from monitor.roteiro import combinar, ler_voos, roteiros_pelas_ligacoes, todos_os_voos
+    from monitor.roteiro import combinar
     st.title("📅 Calendário e roteiros")
     df = historico()
     if df.empty:
         sem_dados()
         return
     lista = viagens()
-    nomes = {v["id"]: nome_viagem(v) for v in lista}
+    nomes = nomes_unicos(lista)
     op, voos = dados_atuais(df, lista)
     rotas = [r for r in _rotas_obj(lista) if r.ativa]
     rotas_lig = {r.id: r for r in rotas}
@@ -1162,40 +1184,11 @@ def tela_calendario() -> None:
     if not ids:
         sem_dados()
         return
-    from monitor.hospedagem import com_hospedagem, custos, noites, total_hospedagem, voos_por_pessoa
+    from monitor.hospedagem import custos, noites, total_hospedagem, voos_por_pessoa
     cfg_h, precos_h = hospedagem_atual()
 
+    # as ligações servem só para avisar (choque de horário / estadia mínima): não montam roteiros sozinhas
     cen = None
-    with st.container(border=True):
-        st.subheader("🧭 Roteiros possíveis")
-        st.caption("Montados pelas **ligações** que você marca em cada viagem (✏️ → 🔗 \"Esta viagem acontece depois "
-                   "de…\"). Cada roteiro escolhe **um voo de cada trecho**, entre todos os voos guardados de cada dia "
-                   "(não só o mais barato), respeitando os intervalos de cada ligação. Os mais baratos aparecem primeiro"
-                   + (" por pessoa (passagem + sua parte da hospedagem sugerida; veja 🏠 Hospedagens)." if cfg_h else "."))
-        if not any(r.depois_de for r in rotas):
-            st.info("Você ainda não marcou ligações. Exemplo: em **Rio→Tampa**, marque \"depois de REC→Galeão ou "
-                    "REC→Santos Dumont\", com intervalo de 1 a 5 dias. Aí os roteiros aparecem aqui sozinhos.")
-        else:
-            cs, sem_voos = roteiros_pelas_ligacoes(rotas, voos, limite=40 if cfg_h else 10)
-            totais = None
-            if cfg_h:  # ordena por voos + hospedagem sugerida
-                totais = com_hospedagem(cs, cfg_h, precos_h, adultos=adultos_por_viagem(lista))[:10]
-                cs = [rt.cenario for rt in totais]
-            if sem_voos:
-                st.caption("Ainda sem voos com horário: " + ", ".join(nomes.get(i, i) for i in sem_voos) +
-                           " (esses caminhos ficam de fora por enquanto).")
-            fins = {cidade_curta(c.trechos[-1].destino) for c in cs}
-            if len(fins) > 1:
-                st.caption("⚠️ Os roteiros terminam em lugares diferentes (" + ", ".join(sorted(fins)) + "): um "
-                           "roteiro com menos trechos parece mais barato. Para comparar de igual para igual, "
-                           "cadastre também a volta de cada lugar (ex.: Paris→Recife) ligada à chegada lá.")
-            if not cs:
-                st.warning("Nenhuma combinação de datas e horários respeita os intervalos das ligações.")
-            else:
-                cen = _escolher_cenario(cs, "cen_lig", totais)
-                _mostrar_cenario(cen, nomes)
-                if st.button("🧮 Abrir este roteiro no simulador", key="abrir_sim_lig"):
-                    abrir_no_simulador(cen)
 
     problemas = ligacoes_impossiveis(rotas, voos, nomes)
     if problemas:
@@ -1203,7 +1196,7 @@ def tela_calendario() -> None:
             st.markdown("**⚠️ Ligações que nunca encaixam** (com os voos encontrados até agora)")
             for p in problemas:
                 st.markdown(f"- {p}")
-            st.caption("Corrija em Minhas viagens (✏️ → 🔗). Enquanto isso, esses caminhos ficam fora dos roteiros.")
+            st.caption("Corrija em Minhas viagens (✏️ → 🔗). É só um aviso: os voos continuam no calendário.")
 
     with st.expander("Montar um roteiro à mão (sem usar as ligações)"):
         so_ida = [i for i in ids if any(o.volta is None for o in op[i].values())]
@@ -1603,8 +1596,8 @@ def tela_testar() -> None:
     ids = [v["id"] for v in lista]
     if st.session_state.get("testar_sel") not in ids:
         st.session_state["testar_sel"] = ids[0]
-    sel = st.selectbox("Viagem", ids, key="testar_sel",
-                       format_func=lambda i: nome_viagem(next(v for v in lista if v["id"] == i)))
+    nomes_t = nomes_unicos(lista)
+    sel = st.selectbox("Viagem", ids, key="testar_sel", format_func=lambda i: nomes_t.get(i, i))
     v = next(x for x in lista if x["id"] == sel)
     fontes = st.multiselect("Fontes", v.get("fontes") or [], default=v.get("fontes") or [], key=f"testar_fontes_{sel}",
                             format_func=lambda f: NOMES_FONTES.get(f, f))
