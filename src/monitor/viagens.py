@@ -20,7 +20,7 @@ from .models import Consulta
 
 INICIO_ROTAS = re.compile(r"^rotas:.*$", re.M)
 #: ordem dos campos de cada viagem no arquivo
-ORDEM = ["id", "nome", "ativa", "origem", "destino", "ida", "volta", "duracao_dias",
+ORDEM = ["id", "nome", "grupo", "ativa", "origem", "destino", "ida", "volta", "duracao_dias",
          "adultos", "preco_alvo", "queda_pct", "fontes", "depois_de", "intervalo_min_horas", "intervalo_max_horas"]
 
 

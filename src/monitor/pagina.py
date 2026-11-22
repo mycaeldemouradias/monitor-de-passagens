@@ -23,7 +23,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from .calendario import MESES, _quando, calendario_html, cidade_curta
+from .calendario import MESES, _quando, calendario_html, cidade_curta, noites_do_calendario
+from .hospedagem import com_hospedagem, ler_config, ler_precos, link_com_datas, quarto
 from .config import CONFIG_PADRAO, Geral, _rota
 from .regras import brl
 from .roteiro import Cenario, hoje_recife, ler_voos, opcoes, roteiros_pelas_ligacoes, todos_os_voos
@@ -68,7 +69,7 @@ def _dados(config: Path, dados: Path, agora: datetime):
 
 
 # ------------------------------------------------------------------ conteúdo
-def _roteiro_html(cen: Cenario, nomes: dict) -> str:
+def _roteiro_html(cen: Cenario, nomes: dict, rt=None) -> str:
     itens = []
     for a, prox in zip(cen.trechos, cen.trechos[1:] + [None]):
         onde = NOMES_FONTES.get(a.fonte, a.fonte) + (f" ({a.vendedor})" if a.vendedor else "")
@@ -81,7 +82,26 @@ def _roteiro_html(cen: Cenario, nomes: dict) -> str:
             tempo = f"{horas / 24:.1f} dias".replace(".", ",") if horas >= 24 else f"{horas:.0f}h"
             itens.append(f'<li class="estadia">📍 Em {html.escape(cidade_curta(a.destino))}: de {_quando(a.chegada)} '
                          f"a {_quando(prox.partida)} ({tempo})</li>")
-    return f'<ul class="roteiro">{"".join(itens)}</ul><p class="total">Total: <b>{brl(cen.total)}</b></p>'
+    if rt is not None:
+        for c in rt.custos:
+            r = c.reserva
+            if c.total is not None:
+                link = f' · <a href="{html.escape(c.link)}" target="_blank" rel="noopener">abrir</a>' if c.link else ""
+                itens.append(f"<li>🏠 {r.noites} noite(s) {r.entrada:%d/%m}→{r.saida:%d/%m} · <b>{brl(c.total)}</b> · "
+                             f"{html.escape(c.nome)}{link}</li>")
+                if c.segunda:
+                    t2, n2, l2 = c.segunda
+                    a2 = f' · <a href="{html.escape(l2)}" target="_blank" rel="noopener">abrir</a>' if l2 else ""
+                    itens.append(f'<li class="estadia">↳ 2ª opção: {brl(t2)} · {html.escape(n2)}{a2}</li>')
+            else:
+                itens.append(f"<li>🏠 {r.noites} noite(s) {r.entrada:%d/%m}→{r.saida:%d/%m} · ⏳ sem preço ainda</li>")
+        falta = " (falta preço de hospedagem)" if rt.sem_preco else ""
+        total = (f"👤 Por pessoa: voos {brl(rt.voos_pp)} + hospedagem {brl(rt.hosp_pp)} = <b>{brl(rt.total)}</b><br>"
+                 f"👥 Para {rt.pessoas}: voos {brl(rt.voos_pp * rt.pessoas)} + hospedagem {brl(rt.hospedagem)} = "
+                 f"<b>{brl(rt.total_grupo)}</b>{falta}")
+    else:
+        total = f"Total: <b>{brl(cen.total)}</b>"
+    return f'<ul class="roteiro">{"".join(itens)}</ul><p class="total">{total}</p>'
 
 
 def conteudo(config: Path = CONFIG_PADRAO, dados: Path = RAIZ / "data", agora: datetime | None = None) -> str:
@@ -113,15 +133,23 @@ def conteudo(config: Path = CONFIG_PADRAO, dados: Path = RAIZ / "data", agora: d
 
     # roteiros pelas ligações
     cenarios: list[Cenario | None] = []
+    cfg = ler_config(config.parent / "hospedagens.yaml")
+    precos = ler_precos(dados / "hospedagens.json")["precos"]
+    rts: list = []
     if any(r.depois_de for r in rotas):
-        cenarios, _ = roteiros_pelas_ligacoes(rotas, voos, limite=N_ROTEIROS)
+        cenarios, _ = roteiros_pelas_ligacoes(rotas, voos, limite=40 if cfg else N_ROTEIROS)
+        if cfg:  # ordena por voos + hospedagem sugerida
+            adultos = {v["id"]: max(int(v.get("adultos") or 1), 1) for v in lista}
+            rts = com_hospedagem(cenarios, cfg, precos, adultos=adultos)[:N_ROTEIROS]
+            cenarios = [rt.cenario for rt in rts]
     if cenarios:
-        botoes = "".join(f'<button class="aba{" ativa" if i == 0 else ""}" data-i="{i}">{i + 1}º · {brl(c.total)}</button>'
-                         for i, c in enumerate(cenarios))
-        detalhes = "".join(f'<div class="cen" data-i="{i}"{"" if i == 0 else " hidden"}>{_roteiro_html(c, nomes)}</div>'
-                           for i, c in enumerate(cenarios))
-        partes.append(f'<h2>🧭 Roteiros mais baratos</h2><p class="nota">Montados pelas ligações das viagens. '
-                      f'Escolha um para ver no calendário.</p><div class="abas">{botoes}</div>{detalhes}')
+        botoes = "".join(f'<button class="aba{" ativa" if i == 0 else ""}" data-i="{i}">{i + 1}º · '
+                         f'{brl(rts[i].total) + " por pessoa" if rts else brl(c.total)}</button>' for i, c in enumerate(cenarios))
+        detalhes = "".join(f'<div class="cen" data-i="{i}"{"" if i == 0 else " hidden"}>'
+                           f'{_roteiro_html(c, nomes, rts[i] if rts else None)}</div>' for i, c in enumerate(cenarios))
+        partes.append(f'<h2>🧭 Roteiros mais baratos</h2><p class="nota">Montados pelas ligações das viagens'
+                      + (", somando a hospedagem sugerida" if rts else "")
+                      + f'. Escolha um para ver no calendário.</p><div class="abas">{botoes}</div>{detalhes}')
     else:
         cenarios = [None]
 
@@ -130,17 +158,40 @@ def conteudo(config: Path = CONFIG_PADRAO, dados: Path = RAIZ / "data", agora: d
         meses = sorted({(d.year, d.month) for r in ids for d in op[r]})
         cals = []
         for i, cen in enumerate(cenarios):
+            nts = noites_do_calendario(rts[i].noites, rts[i].custos, cfg) if rts else None
             corpo = "".join(f"<h3>{MESES[m - 1].capitalize()} de {a}</h3><div class=\"rolar\">"
-                            + calendario_html(a, m, op, ids, cen, nomes, voos, rotas_lig, clicavel=True) + "</div>"
-                            for a, m in meses)
+                            + calendario_html(a, m, op, ids, cen, nomes, voos, rotas_lig, clicavel=True, noites=nts,
+                                              adultos={v["id"]: max(int(v.get("adultos") or 1), 1) for v in lista})
+                            + "</div>" for a, m in meses)
             cals.append(f'<div class="cen" data-i="{i}"{"" if i == 0 else " hidden"}>{corpo}</div>')
         partes.append('<h2>📅 Calendário</h2><p class="nota">Toque num voo para pôr ou tirar da sua simulação '
                       '(azul = escolhido). <b>★ verde</b> = o mais barato do dia para o mesmo destino ou da mesma '
-                      'origem. ❌ vermelho = choque de horário. Passe o dedo para o lado para ver a semana toda.</p>'
+                      'origem. ❌ vermelho = choque de horário. 🌙 = onde você dorme: troque na lista de cada noite '
+                      '(noites seguidas no mesmo lugar = uma reserva). Passe o dedo para o lado para ver a semana toda.</p>'
                       '<div id="soma" class="soma"></div>' + "".join(cals))
     partes.append('<p class="nota">Preços da última coleta de cada data; podem ter mudado. Bilhetes separados: '
                   "se um voo atrasar, o seguinte não é protegido.</p>")
-    return _MOLDE.replace("{{CORPO}}", "".join(partes))
+    return (_MOLDE.replace("{{CORPO}}", "".join(partes)).replace("{{HOSP}}", json.dumps(_tabela_hospedagem(cfg, precos)))
+            .replace("{{PESSOAS}}", str(cfg.hospedes if cfg else 1)))
+
+
+def _tabela_hospedagem(cfg, precos: dict) -> dict:
+    """{grupo: {"entrada|saída": [[total, nome, link], …]}}: as 2 mais baratas de cada reserva já buscada (para a
+    página recalcular quando você troca uma noite)."""
+    if not cfg:
+        return {}
+    saida: dict = {}
+    for g in cfg.grupos:
+        quartos = {quarto(l) for l in g.links} - {None}
+        for k, p in precos.items():
+            q, e, s, h = k.split("|")  # q: código do anúncio (Airbnb ou "booking:…")
+            if q in quartos and int(h) == cfg.hospedes and p.get("total") is not None:
+                saida.setdefault(f"g:{g.id}", {}).setdefault(f"{e}|{s}", []).append(
+                    [p["total"], (p.get("nome") or "")[:28], link_com_datas(q, e, s, int(h))])
+    for reservas in saida.values():
+        for k, lista in reservas.items():
+            reservas[k] = sorted(lista, key=lambda x: x[0])[:2]
+    return saida
 
 
 _MOLDE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
@@ -177,11 +228,40 @@ function somar(){
   for(let i=1;i<comHora.length;i++){if(comHora[i].dataset.partida<comHora[i-1].dataset.chegada){
     comHora[i].classList.add('problema');comHora[i-1].classList.add('problema');choques++;}}
   const total=esc.reduce((s,c)=>s+parseFloat(c.dataset.preco),0);
+  const [hosp,falta]=noites();
   const caixa=document.getElementById('soma');if(!caixa)return;
   caixa.classList.toggle('erro',choques>0);
-  caixa.innerHTML=esc.length?`Sua simulação: <b>${esc.length} voo(s) · ${brl(total)}</b>`+
-    (choques?` · ❌ ${choques} choque(s) de horário`:'') :'Nenhum voo escolhido. Toque num voo do calendário.';
+  const N=PESSOAS;
+  let txt=`Sua simulação: <b>${esc.length} voo(s)</b>`;
+  if(hosp!==null){txt+=`<br>👤 Por pessoa: voos ${brl(total)} + hospedagem ${brl(hosp/N)} = <b>${brl(total+hosp/N)}</b>`+
+    `<br>👥 Para ${N}: voos ${brl(total*N)} + hospedagem ${brl(hosp)} = <b>${brl(total*N+hosp)}</b>`+
+    (falta?`<br>⏳ ${falta} reserva(s) de hospedagem sem preço`:'');}
+  else txt+=` · ${brl(total)} por pessoa`;
+  caixa.innerHTML=esc.length?txt+(choques?`<br>❌ ${choques} choque(s) de horário`:''):'Nenhum voo escolhido. Toque num voo do calendário.';
 }
+// 🌙 noites: junta noites seguidas no mesmo lugar em reservas e procura o preço já buscado
+const HOSP={{HOSP}}, PESSOAS={{PESSOAS}};
+const dia1=d=>{const x=new Date(d+'T12:00:00');x.setDate(x.getDate()+1);return x.toISOString().slice(0,10)};
+function noites(){
+  const sels=[...document.querySelectorAll('.cen:not([hidden]) select[data-noite]')].sort((a,b)=>a.dataset.noite<b.dataset.noite?-1:1);
+  if(!sels.length)return [null,0];
+  const res=[];
+  for(const s of sels){const d=s.dataset.noite,t=s.value,ult=res[res.length-1];
+    if(!t.startsWith('g:'))continue;
+    if(ult&&ult.g===t&&ult.saida===d){ult.saida=dia1(d);ult.sels.push(s);}else res.push({g:t,entrada:d,saida:dia1(d),sels:[s]});}
+  sels.forEach(s=>{const nt=s.parentElement.querySelector('.nt');if(nt)nt.innerHTML=''});
+  let soma=0,falta=0;
+  const f=d=>d.slice(8,10)+'/'+d.slice(5,7);
+  for(const r of res){const ps=(HOSP[r.g]||{})[r.entrada+'|'+r.saida]||[],p=ps[0],p2=ps[1];const n=r.sels.length;
+    const per=`${n} noite(s), ${f(r.entrada)}→${f(r.saida)}`;
+    const nt=r.sels[0].parentElement.querySelector('.nt');
+    if(p){soma+=p[0];if(nt)nt.innerHTML=`<b>${brl(p[0])}</b> · ${per} · ${p[1]} · <a href="${p[2]}" target="_blank" rel="noopener">abrir</a>`
+      +(p2?`<br>2ª: ${brl(p2[0])} · ${p2[1]} · <a href="${p2[2]}" target="_blank" rel="noopener">abrir</a>`:'');}
+    else{falta++;if(nt)nt.innerHTML=`⏳ sem preço para ${per} (o GitHub busca as datas dos roteiros sugeridos)`;}
+    r.sels.slice(1).forEach(s=>{const x=s.parentElement.querySelector('.nt');if(x)x.textContent='↳ mesma reserva'});}
+  return [soma,falta];
+}
+document.addEventListener('change',e=>{if(e.target.matches('select[data-noite]'))somar();});
 document.addEventListener('click',e=>{const c=e.target.closest('.chip[data-id]');if(!c)return;
   c.classList.toggle('voo');somar();});
 somar();

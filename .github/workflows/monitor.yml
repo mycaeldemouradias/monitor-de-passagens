@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       fontes:
-        description: "Só estas fontes (separadas por espaço; vazio = todas). Ex.: skiplagged"
+        description: "Só estas fontes (separadas por espaço; vazio = todas). Ex.: skiplagged · hospedagem = só buscar hospedagem agora"
         type: string
         default: ""
 
@@ -31,17 +31,49 @@ env:
   MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
 
 jobs:
-  # O Skiplagged roda dividido em 6 computadores ao mesmo tempo (cada um com outro IP): todas as datas
-  # em toda rodada (até 15 por computador = 90 datas). Se algum for bloqueado, a "repescagem" (mais 2
-  # computadores, outros IPs) busca só as datas que ficaram faltando.
-  skiplagged:
+  # Quantos computadores o Skiplagged usa: ~12 datas por computador (de 6 a 60). Assim, ao cadastrar viagens
+  # novas, a rodada cresce sozinha e todas as datas são buscadas em toda rodada. O plano gratuito roda 20 ao
+  # mesmo tempo: os outros esperam na fila e começam sozinhos assim que um termina (~8 min cada).
+  planejar:
     if: ${{ !inputs.fontes || contains(inputs.fontes, 'skiplagged') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      n: ${{ steps.conta.outputs.n }}
+      partes: ${{ steps.conta.outputs.partes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre (viagens)
+        run: python -m monitor.cofre abrir config
+      - name: Contar as datas
+        id: conta
+        run: |
+          total=$(python -m monitor --fontes skiplagged --listar | sed -n 's/^\[skiplagged\] \([0-9]*\) busca.*/\1/p')
+          n=$(( (${total:-0} + 11) / 12 )); [ "$n" -lt 6 ] && n=6; [ "$n" -gt 60 ] && n=60
+          echo "Skiplagged: ${total:-0} data(s) em $n computadores."
+          echo "n=$n" >> "$GITHUB_OUTPUT"
+          echo "partes=[$(seq 1 $n | paste -sd, -)]" >> "$GITHUB_OUTPUT"
+
+  # O Skiplagged roda dividido em vários computadores ao mesmo tempo (cada um com outro IP). Se algum for
+  # bloqueado, a "repescagem" (mais computadores, outros IPs) busca só as datas que ficaram faltando; e o que
+  # ainda faltar depois dela vai para uma 2ª repescagem.
+  skiplagged:
+    needs: planejar
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 20   # o máximo do plano gratuito do GitHub
       matrix:
-        parte: [1, 2, 3, 4, 5, 6]
+        parte: ${{ fromJSON(needs.planejar.outputs.partes) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,8 +86,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Abrir o cofre (viagens e estado, para o rodízio)
         run: python -m monitor.cofre abrir tudo
-      - name: Buscar (parte ${{ matrix.parte }} de 6)
-        run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/6 --salvar-ofertas parte-${{ matrix.parte }}.cripto
+      - name: Buscar (parte ${{ matrix.parte }} de ${{ needs.planejar.outputs.n }})
+        run: python -m monitor --fontes skiplagged --parte ${{ matrix.parte }}/${{ needs.planejar.outputs.n }} --salvar-ofertas parte-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
           name: parte-${{ matrix.parte }}
@@ -71,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parte: [1, 2]
+        parte: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,10 +123,10 @@ jobs:
           pattern: parte-*
           path: feitas
           merge-multiple: true
-      - name: Buscar o que ficou faltando (parte ${{ matrix.parte }} de 2)
+      - name: Buscar o que ficou faltando (parte ${{ matrix.parte }} de 5)
         run: |
           mkdir -p feitas
-          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/2 --salvar-ofertas repescagem-${{ matrix.parte }}.cripto
+          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/5 --salvar-ofertas repescagem-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
           name: parte-r${{ matrix.parte }}
@@ -102,8 +134,48 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
+  # 2ª repescagem: o que ainda faltou depois da 1ª (outros 3 computadores, outros IPs)
+  repescagem2:
+    needs: repescagem
+    if: ${{ always() && (!inputs.fontes || contains(inputs.fontes, 'skiplagged')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre (viagens e estado, para o rodízio)
+        run: python -m monitor.cofre abrir tudo
+      - name: Baixar as partes já feitas (incluindo a 1ª repescagem)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: parte-*
+          path: feitas
+          merge-multiple: true
+      - name: Buscar o que ainda falta (parte ${{ matrix.parte }} de 3)
+        run: |
+          mkdir -p feitas
+          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/3 --salvar-ofertas repescagem2-${{ matrix.parte }}.cripto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-s${{ matrix.parte }}
+          path: repescagem2-${{ matrix.parte }}.cripto
+          retention-days: 1
+          if-no-files-found: ignore
+
   monitorar:
-    needs: [skiplagged, repescagem]
+    needs: [skiplagged, repescagem, repescagem2]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -175,10 +247,58 @@ jobs:
             git push
           fi
 
+  # Hospedagem (Airbnb): preço dos seus links para as noites dos roteiros mais baratos. A cada 12h
+  # (o preço de hospedagem muda menos; e menos visitas = menos risco de bloqueio).
+  hospedagem:
+    needs: monitorar
+    if: ${{ always() && inputs.simular != true && (!inputs.fontes || contains(inputs.fontes, 'hospedagem')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main   # já com os voos que a rodada acabou de salvar
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Abrir o cofre
+        run: python -m monitor.cofre abrir tudo
+      - name: Está na hora?
+        id: hora
+        run: |
+          if [ "$FONTES" = "hospedagem" ] || python -m monitor.hospedagem --precisa; then
+            echo "buscar=sim" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          FONTES: ${{ inputs.fontes }}
+      - name: Instalar Chromium
+        if: steps.hora.outputs.buscar == 'sim'
+        run: python -m playwright install --with-deps chromium
+      - name: Buscar hospedagem
+        if: steps.hora.outputs.buscar == 'sim'
+        run: python -m monitor.hospedagem --a-cada ${{ inputs.fontes == 'hospedagem' && '0' || '12' }}
+      - name: Salvar (criptografado)
+        if: steps.hora.outputs.buscar == 'sim'
+        run: |
+          python -m monitor.cofre fechar dados
+          git config user.name "monitor-passagens[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "Sem mudanças."
+          else
+            git commit -m "hospedagem: $(date -u +%Y-%m-%dT%H:%MZ)"
+            git pull --rebase --autostash
+            git push
+          fi
+
   # Página com senha (GitHub Pages): preços, roteiros e calendário para ver de qualquer lugar.
   # O conteúdo vai criptografado (AES-256); só abre com a PAGINA_SENHA. Só para ver.
   pagina:
-    needs: monitorar
+    needs: [monitorar, hospedagem]
     if: ${{ always() && inputs.simular != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -209,5 +329,7 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ runner.temp }}/site
+      - name: Esperar o GitHub registrar a página
+        run: sleep 15   # em 22/11/2026 o deploy procurou a página 0,4 s depois do envio e não achou
       - id: publicar
         uses: actions/deploy-pages@v4

@@ -1,8 +1,8 @@
 """Cofre: criptografa o que é pessoal antes de ir para o repositório (que é público).
 
 No repositório só ficam os arquivos `.cripto`. As versões legíveis ficam fora do Git (.gitignore):
-- config/rotas.yaml e config/pausas.yaml          → config/<nome>.cripto
-- data/estado.json e data/ultima_execucao.json    → data/<nome>.cripto
+- config/rotas.yaml, pausas.yaml, hospedagens.yaml → config/<nome>.cripto
+- data/estado.json, ultima_execucao.json, hospedagens.json → data/<nome>.cripto
 - data/historico_precos.csv                       → data/historico/AAAA-MM-DD.csv.gz.cripto
   (um arquivo por dia UTC: cada rodada só regrava o dia de hoje, e o repositório não incha)
 
@@ -34,8 +34,8 @@ from .historico import COLUNAS
 RAIZ = Path(__file__).resolve().parents[2]
 EXT = ".cripto"
 SIMPLES = {
-    "config": ["config/rotas.yaml", "config/pausas.yaml"],
-    "dados": ["data/estado.json", "data/ultima_execucao.json", "data/voos.json"],
+    "config": ["config/rotas.yaml", "config/pausas.yaml", "config/hospedagens.yaml"],
+    "dados": ["data/estado.json", "data/ultima_execucao.json", "data/voos.json", "data/hospedagens.json"],
 }
 #: compactados antes de criptografar (arquivos maiores, que mudam a cada rodada)
 COMPACTAR = {"data/voos.json"}

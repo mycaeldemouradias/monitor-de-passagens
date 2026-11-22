@@ -10,6 +10,7 @@ painel/painel.log
 # --- repositório público: o que é pessoal só vai criptografado (.cripto) ---
 config/rotas.yaml
 config/pausas.yaml
+config/hospedagens.yaml
 data/*
 !data/.gitkeep
 !data/*.cripto

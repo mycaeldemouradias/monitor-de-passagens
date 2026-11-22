@@ -13,6 +13,7 @@ import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -22,7 +23,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 
 from monitor.aeroportos import mesma_cidade, rotulo, todos as aeroportos  # noqa: E402
-from monitor.calendario import MESES, _quando, calendario_html, cidade_curta  # noqa: E402
+from monitor.calendario import MESES, _quando, calendario_html, cidade_curta, noites_do_calendario  # noqa: E402
 from monitor.config import CONFIG_PADRAO, Geral, carregar, expandir_datas, intervalo_min, ler_pausas  # noqa: E402
 from monitor.models import DIAS  # noqa: E402
 from monitor.regras import brl  # noqa: E402
@@ -44,8 +45,9 @@ FONTES_OK = {
 FONTES_BLOQUEADAS = {"latam": "LATAM", "gol": "Gol", "azul": "Azul", "decolar": "Decolar",
                      "skyscanner": "Skyscanner"}
 NOMES_FONTES = {k: v[0] for k, v in FONTES_OK.items()} | FONTES_BLOQUEADAS
-#: em quantos computadores do GitHub o Skiplagged roda por rodada (matriz do workflow)
-PARTES_SKIPLAGGED = 6
+def partes_skiplagged(n_datas: int) -> int:
+    """Em quantos computadores do GitHub o Skiplagged roda (o mesmo cálculo do job `planejar` do workflow)."""
+    return min(60, max(6, -(-n_datas // 12)))
 
 
 # ----------------------------------------------------------------- utilidades
@@ -80,6 +82,26 @@ def resumo_datas(spec) -> str:
 
 def nome_viagem(v: dict) -> str:
     return v.get("nome") or f"{v.get('origem')} → {v.get('destino')}"
+
+
+_SUFIXO_PAR = re.compile(r" \([A-Z]{3} → [A-Z]{3}\)$")
+
+
+def irmas(v: dict, lista: list[dict]) -> list[dict]:
+    """As viagens do mesmo grupo (cadastradas juntas com vários aeroportos), na ordem do arquivo."""
+    if not v.get("grupo"):
+        return [v]
+    return [x for x in lista if x.get("grupo") == v["grupo"]] or [v]
+
+
+def nome_grupo(sib: list[dict]) -> str:
+    """Nome do cartão: o nome dado (sem o "(REC → GIG)" do fim) ou "REC → GIG · SDU"."""
+    base = _SUFIXO_PAR.sub("", sib[0].get("nome") or "")
+    if base:
+        return base
+    origens = list(dict.fromkeys(x["origem"] for x in sib))
+    destinos = list(dict.fromkeys(x["destino"] for x in sib))
+    return f"{' · '.join(origens)} → {' · '.join(destinos)}"
 
 
 def geral() -> Geral:
@@ -122,8 +144,8 @@ def frequencia(lista: list[dict], g: Geral) -> dict[str, str]:
         if f == "google_flights":
             vezes = min(24 / g.google_flights_a_cada_horas, (g.orcamento_serpapi_mes / 30) / n)
         elif f == "skiplagged":
-            # 6 computadores por rodada + repescagem (ver .github/workflows/monitor.yml), até N datas cada
-            vezes = rodadas * min(1, PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada / n)
+            # ~12 datas por computador (6 a 60, 20 ao mesmo tempo) + repescagens (ver .github/workflows/monitor.yml)
+            vezes = rodadas * min(1, partes_skiplagged(n) * g.skiplagged_max_por_rodada / n)
         else:
             vezes = rodadas
         if vezes >= 1:
@@ -183,14 +205,20 @@ def _limitar(valor, minimo: int, maximo: int) -> int:
         return minimo
 
 
-def campo_aeroporto(titulo: str, codigo: str, chave: str) -> str:
+MAX_PARES = 12  # combinações origem × destino de uma vez (cada uma vira uma viagem)
+
+
+def campo_aeroportos(titulo: str, codigos: list[str], chave: str) -> list[str]:
+    """Um ou mais aeroportos. Cada combinação origem × destino vira uma viagem separada (busca individual)."""
     lista = aeroportos()
-    opcoes = list(lista) if codigo in lista or not codigo else [codigo, *lista]
-    return st.selectbox(titulo, opcoes, index=opcoes.index(codigo) if codigo in opcoes else 0, key=chave,
-                        format_func=lambda c: f"{c} — {lista[c]}" if c in lista else f"{c} (fora da lista)",
-                        help=f"Digite a cidade, o aeroporto ou o código. São {len(lista):,} aeroportos comerciais "
-                             "do mundo; os mais usados aparecem primeiro. Cidades de fora do Brasil podem estar "
-                             "em inglês (ex.: Lisbon).".replace(",", "."))
+    opcoes = [c for c in codigos if c not in lista] + list(lista)
+    return st.multiselect(titulo, opcoes, default=codigos, key=chave,
+                          format_func=lambda c: f"{c} — {lista[c]}" if c in lista else f"{c} (fora da lista)",
+                          placeholder="Digite a cidade, o aeroporto ou o código",
+                          help=f"Pode escolher **mais de um** (ex.: CDG, ORY e BVA para Paris): cada aeroporto vira "
+                               f"uma viagem separada, com as mesmas datas e regras, e cada uma é buscada à parte. "
+                               f"São {len(lista):,} aeroportos comerciais do mundo; os mais usados aparecem primeiro. "
+                               "Cidades de fora do Brasil podem estar em inglês (ex.: Lisbon).".replace(",", "."))
 
 
 def campo_datas(chave: str, spec, titulo: str):
@@ -256,19 +284,35 @@ def limpar_formulario() -> None:
 def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
     nova = v is None
     v = v or {}
+    sib = irmas(v, lista) if v else []          # editando um grupo: todas as viagens dele juntas
+    sib_ids = {x["id"] for x in sib}
     k = "form_" + (v.get("id") or "nova")
-    st.subheader("➕ Nova viagem" if nova else f"✏️ Editar: {nome_viagem(v)}")
+    st.subheader("➕ Nova viagem" if nova else f"✏️ Editar: {nome_grupo(sib)}")
 
-    nome = st.text_input("Nome da viagem (para você reconhecer)", value=v.get("nome", ""),
+    nome = st.text_input("Nome da viagem (para você reconhecer)", value=_SUFIXO_PAR.sub("", v.get("nome", "")),
                          placeholder="Ex.: Férias em São Paulo", key=k + "_nome")
-    tem_volta = nova or bool(v.get("volta") or v.get("duracao_dias"))
+    tem_volta = bool(v.get("volta") or v.get("duracao_dias"))
     tipo = st.radio("Tipo de passagem", ["Ida e volta", "Só ida"], index=0 if tem_volta else 1,
                     horizontal=True, key=k + "_tipo")
     c1, c2 = st.columns(2)
     with c1:
-        origem = campo_aeroporto("Saindo de", v.get("origem", "REC"), k + "_orig")
+        origens = campo_aeroportos("Saindo de", list(dict.fromkeys(x["origem"] for x in sib)) or ["REC"], k + "_orig")
     with c2:
-        destino = campo_aeroporto("Indo para", v.get("destino", "GRU"), k + "_dest")
+        destinos = campo_aeroportos("Indo para", list(dict.fromkeys(x["destino"] for x in sib)) or ["GRU"], k + "_dest")
+    pares = [(o, d) for o in origens for d in destinos if o != d]
+    if len(pares) > MAX_PARES:
+        st.error(f"São {len(pares)} combinações de aeroportos: o máximo é {MAX_PARES} de uma vez. Confira os aeroportos "
+                 "marcados (talvez algum tenha entrado sem querer).")
+        pares = []
+    elif len(pares) > 1:
+        st.info(("Serão criadas" if nova else "Fica(m)") + f" **{len(pares)} viagens separadas** (uma busca "
+                "para cada, com as mesmas datas, avisos e ligações): " + " · ".join(f"{o} → {d}" for o, d in pares)
+                + ". No calendário cada uma aparece com o seu preço, e a mais barata do dia ganha a ★ verde.")
+    tiradas = [x for x in sib if (x["origem"], x["destino"]) not in pares]
+    if tiradas and pares:
+        st.warning("Ao salvar, sai(em) deste grupo e é(são) excluída(s): "
+                   + ", ".join(f"{x['origem']} → {x['destino']}" for x in tiradas)
+                   + " (os preços já guardados continuam no histórico).")
 
     ida = campo_datas(k + "_ida", v.get("ida"), "Datas de ida")
     volta = duracao = None
@@ -304,7 +348,7 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
     fontes = escolher_fontes(v.get("fontes") or ["google_flights", "skiplagged"], k)
 
     st.markdown("**🔗 Ligação com outras viagens** (opcional)")
-    outras = [x["id"] for x in lista if x.get("id") != v.get("id")]
+    outras = [x["id"] for x in lista if x.get("id") not in sib_ids]
     nomes_o = {x["id"]: nome_viagem(x) for x in lista}
     atuais_dep = v.get("depois_de") or []
     atuais_dep = [atuais_dep] if isinstance(atuais_dep, str) else atuais_dep
@@ -320,19 +364,29 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
         int_min, int_max = campo_intervalo(k + "_int", intervalo_min(v),
                                            float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None)
 
-    ids = {x["id"] for x in lista if x.get("id") != v.get("id")}
-    nova_v = {
-        "id": v.get("id") or criar_id(nome or f"{origem}-{destino}", ids),
-        "nome": nome.strip(), "ativa": v.get("ativa", True), "origem": origem, "destino": destino,
-        "ida": ida, "volta": volta, "duracao_dias": duracao, "adultos": int(adultos),
-        "preco_alvo": int(alvo) or None, "queda_pct": int(queda), "fontes": fontes,
-        "depois_de": depois_de or None, "intervalo_min_horas": int_min if depois_de else None,
-        "intervalo_max_horas": int_max if depois_de else None,
-    }
-    if ida and (tipo == "Só ida" or volta or duracao):
+    ids = {x["id"] for x in lista if x.get("id") not in sib_ids}
+    varias = len(pares) > 1
+    por_par = {(x["origem"], x["destino"]): x["id"] for x in sib}   # pares que já existiam mantêm o código
+    ids |= {i for par, i in por_par.items() if par in pares}
+    criadas = []
+    for o, d in pares:
+        nome_j = f"{nome.strip()} ({o} → {d})" if (varias and nome.strip()) else nome.strip()
+        id_j = por_par.get((o, d)) or criar_id(nome_j or f"{o}-{d}", ids)
+        ids.add(id_j)
+        criadas.append({
+            "id": id_j, "nome": nome_j, "ativa": v.get("ativa", True), "origem": o, "destino": d,
+            "ida": ida, "volta": volta, "duracao_dias": duracao, "adultos": int(adultos),
+            "preco_alvo": int(alvo) or None, "queda_pct": int(queda), "fontes": fontes,
+            "depois_de": depois_de or None, "intervalo_min_horas": int_min if depois_de else None,
+            "intervalo_max_horas": int_max if depois_de else None,
+        })
+    grupo = (v.get("grupo") or criadas[0]["id"]) if (varias and criadas) else None
+    for c in criadas:
+        c["grupo"] = grupo
+    if criadas and ida and (tipo == "Só ida" or volta or duracao):
         try:
-            cs = consultas(nova_v)
-            st.info(f"Esta viagem gera **{len(cs)} busca(s)** em cada fonte marcada.")
+            cs = [c for x in criadas for c in consultas(x)]
+            st.info(f"{'Estas viagens geram' if varias else 'Esta viagem gera'} **{len(cs)} busca(s)** em cada fonte marcada.")
             with st.expander("Ver as buscas"):
                 st.write("\n".join(f"- {c.descricao()}" for c in cs) or "Nenhuma (as datas já passaram).")
         except Exception as e:  # noqa: BLE001
@@ -340,11 +394,27 @@ def formulario(v: dict | None, lista: list[dict], g: Geral) -> None:
 
     b1, b2, _ = st.columns([1, 1, 4])
     if b1.button("💾 Salvar", type="primary", key=k + "_salvar"):
+        if not criadas:
+            st.error("Escolha ao menos um aeroporto de saída e um de chegada (diferentes).")
+            return
         if tipo == "Ida e volta" and not (volta or duracao):
             st.error("Escolha a volta (data ou número de dias), ou marque **Só ida**.")
             return
-        novas = [nova_v if x.get("id") == v.get("id") else x for x in lista] if not nova else [*lista, nova_v]
-        if gravar(novas, "Viagem salva no Mac"):
+        # o grupo entra no lugar onde estava (ou no fim, se é novo)
+        pos = next((i for i, x in enumerate(lista) if x["id"] in sib_ids), len(lista))
+        novas = ([x for x in lista[:pos] if x["id"] not in sib_ids] + criadas
+                 + [x for x in lista[pos:] if x["id"] not in sib_ids])
+        if sib_ids:
+            # viagens que vinham depois deste grupo valem depois de qualquer aeroporto dele (ex.: chegou em ORY
+            # em vez de CDG); as que saíram do grupo saem das ligações
+            agora_ids = [c["id"] for c in criadas]
+            for x in novas:
+                deps = x.get("depois_de")
+                deps = [deps] if isinstance(deps, str) else list(deps or [])
+                if set(deps) & sib_ids:
+                    deps = [d for d in deps if d not in sib_ids or d in agora_ids]
+                    x["depois_de"] = deps + [i for i in agora_ids if i not in deps]
+        if gravar(novas, f"{len(criadas)} viagens salvas no Mac" if varias else "Viagem salva no Mac"):
             limpar_formulario()
             st.rerun()
     if b2.button("Cancelar", key=k + "_cancelar"):
@@ -358,20 +428,25 @@ def confirmar_exclusao(id_: str) -> None:
     v = next((x for x in lista if x["id"] == id_), None)
     if v is None:
         st.rerun()
-    ligadas = [x for x in lista if id_ in (x.get("depois_de") if isinstance(x.get("depois_de"), list)
-                                           else [x.get("depois_de")])]
-    st.write(f"Excluir **{nome_viagem(v)}**? Os preços já guardados dela continuam no histórico.")
+    sib = irmas(v, lista)
+    fora = {x["id"] for x in sib}
+    ligadas = [x for x in lista if x["id"] not in fora and fora & set(
+        x.get("depois_de") if isinstance(x.get("depois_de"), list) else [x.get("depois_de")])]
+    st.write(f"Excluir **{nome_grupo(sib)}**"
+             + (f" (as {len(sib)} viagens: " + ", ".join(f"{x['origem']} → {x['destino']}" for x in sib) + ")"
+                if len(sib) > 1 else "")
+             + "? Os preços já guardados continuam no histórico.")
     if ligadas:
         st.warning("Estas viagens estão ligadas a ela e vão perder essa ligação: "
                    + ", ".join(nome_viagem(x) for x in ligadas))
     if st.button("Sim, excluir", type="primary"):
         restantes = []
         for x in lista:
-            if x["id"] == id_:
+            if x["id"] in fora:
                 continue
             deps = x.get("depois_de")
             if deps:
-                deps = [d for d in (deps if isinstance(deps, list) else [deps]) if d != id_]
+                deps = [d for d in (deps if isinstance(deps, list) else [deps]) if d not in fora]
                 x["depois_de"] = deps or None
                 if not deps:
                     x["intervalo_min_horas"] = x["intervalo_max_horas"] = None
@@ -382,8 +457,10 @@ def confirmar_exclusao(id_: str) -> None:
 
 def alternar_viagem(id_: str, chave: str) -> None:
     lista = viagens()
+    v = next((x for x in lista if x["id"] == id_), {"id": id_})
+    fora = {x["id"] for x in irmas(v, lista)}
     for x in lista:
-        if x["id"] == id_:
+        if x["id"] in fora:
             x["ativa"] = bool(st.session_state[chave])
     try:
         salvar_viagens(CONFIG, lista)
@@ -483,13 +560,22 @@ def tela_viagens() -> None:
         st.caption(f"Mostrando {len(mostrar)} de {len(lista)} viagens.")
 
     df = historico()
+    vistos_g: set[str] = set()
     for v in mostrar:
+        if v.get("grupo") in vistos_g:
+            continue
+        sib = irmas(v, lista)
+        if v.get("grupo"):
+            vistos_g.add(v["grupo"])
         with st.container(border=True):
             c1, c2 = st.columns([5, 2])
             ida_volta = bool(v.get("volta") or v.get("duracao_dias"))
             with c1:
-                st.markdown(f"#### {nome_viagem(v)}")
-                st.markdown(f"{rotulo(v['origem'])} → {rotulo(v['destino'])}")
+                st.markdown(f"#### {nome_grupo(sib)}")
+                for x in sib:
+                    st.markdown(f"{rotulo(x['origem'])} → {rotulo(x['destino'])}")
+                if len(sib) > 1:
+                    st.caption(f"✈️ {len(sib)} aeroportos: cada um é buscado à parte e aparece separado no calendário.")
                 partes = [("Ida e volta" if ida_volta else "Só ida"), f"Ida: {resumo_datas(v['ida'])}"]
                 if v.get("volta"):
                     partes.append(f"Volta: {resumo_datas(v['volta'])}")
@@ -502,7 +588,7 @@ def tela_viagens() -> None:
                 st.caption(" · ".join(partes))
                 fontes = ", ".join(NOMES_FONTES.get(f, f) for f in v.get("fontes") or [])
                 try:
-                    n = len(consultas(v))
+                    n = sum(len(consultas(x)) for x in sib)
                     st.caption(f"Fontes: {fontes} · {n} busca(s) por fonte"
                                + (" — ⚠️ todas as datas já passaram" if n == 0 else ""))
                 except Exception as e:  # noqa: BLE001
@@ -514,7 +600,10 @@ def tela_viagens() -> None:
                     st.caption(f"🔗 Depois de **{quais}**, com "
                                + _intervalo_txt(intervalo_min(v),
                                                 float(v["intervalo_max_horas"]) if v.get("intervalo_max_horas") else None))
-                mostrar_precos(df, v["id"])
+                for x in sib:
+                    if len(sib) > 1:
+                        st.markdown(f"**{x['origem']} → {x['destino']}**")
+                    mostrar_precos(df, x["id"])
             with c2:
                 chave = f"tg_viagem_{v['id']}"
                 st.toggle("Ligada", value=bool(v.get("ativa", True)), key=chave,
@@ -538,8 +627,9 @@ def tela_viagens() -> None:
             for f, txt in freq.items():
                 st.markdown(f"- **{NOMES_FONTES.get(f, f)}:** {txt}")
             st.caption("Google Flights: o plano gratuito permite ~8 buscas por dia no total. Quanto mais datas, "
-                       f"menos vezes cada uma é atualizada. Skiplagged: {PARTES_SKIPLAGGED} computadores a cada 2h, "
-                       f"até {PARTES_SKIPLAGGED * g.skiplagged_max_por_rodada} datas por rodada.")
+                       "menos vezes cada uma é atualizada. Skiplagged: a cada 2h, 1 computador para cada ~12 datas "
+                       "(até 20 ao mesmo tempo; os demais entram na fila e começam assim que um termina), mais 2 "
+                       "repescagens para as que faltarem.")
 
 
 def _rotas_obj(lista: list[dict]) -> list:
@@ -567,10 +657,16 @@ def _mostrar_cenario(cen: Cenario, nomes: dict) -> None:
                "Bilhetes separados: se um voo atrasar, o seguinte não é protegido.")
 
 
-def _escolher_cenario(cs: list[Cenario], chave: str) -> Cenario:
+def _escolher_cenario(cs: list[Cenario], chave: str, totais: list | None = None) -> Cenario:
     def rotulo_c(i: int) -> str:
         c = cs[i]
-        return f"{i + 1}º · {brl(c.total)} · termina em {cidade_curta(c.trechos[-1].destino)} · " + " | ".join(
+        valor = brl(c.total)
+        if totais:
+            rt = totais[i]
+            valor = (f"{brl(rt.total)} por pessoa · {brl(rt.total_grupo)} para {rt.pessoas} (por pessoa: voos "
+                     f"{brl(rt.voos_pp)} + hospedagem {brl(rt.hosp_pp)}"
+                     + (f"; {rt.sem_preco} reserva(s) sem preço" if rt.sem_preco else "") + ")")
+        return f"{i + 1}º · {valor} · termina em {cidade_curta(c.trechos[-1].destino)} · " + " | ".join(
             f"{o.origem}→{o.destino} {o.partida:%d/%m %H:%M}" for o in c.trechos)
     i = st.radio("Escolha um para ver no calendário", range(len(cs)), format_func=rotulo_c, key=chave)
     return cs[i]
@@ -640,14 +736,119 @@ def filtro_meses(meses: list[tuple[int, int]], chave: str) -> list[tuple[int, in
 _calendario_clicavel = None
 
 
-def calendario_clicavel(html_cal: str, selecionados: list[str], chave: str) -> list[str]:
+def calendario_clicavel(html_cal: str, selecionados: list[str], chave: str) -> tuple[list[str], dict | None]:
+    """(voos marcados, noite trocada agora ou None). A noite vem como {data, tipo, t}."""
     global _calendario_clicavel
     if _calendario_clicavel is None:
         import streamlit.components.v1 as components
         _calendario_clicavel = components.declare_component(
             "calendario_clicavel", path=str(Path(__file__).resolve().parent / "componentes" / "calendario"))
     valor = _calendario_clicavel(html=html_cal, selecionados=selecionados, key=chave, default=None)
-    return selecionados if valor is None else list(valor)
+    if not valor:
+        return selecionados, None
+    noite = valor.get("noite")
+    if noite and st.session_state.get(chave + "_ultima_noite") != noite.get("t"):
+        st.session_state[chave + "_ultima_noite"] = noite.get("t")
+    else:
+        noite = None
+    return list(valor.get("voos") or []), noite
+
+
+def trocar_noite(escolhas: dict, noite: dict, ns: list) -> dict:
+    """Guarda a troca de uma noite (se voltou à sugestão, esquece a troca)."""
+    novo = dict(escolhas)
+    sug = next((n.sugerido for n in ns if n.data.isoformat() == noite["data"]), None)
+    if noite["tipo"] == sug:
+        novo.pop(noite["data"], None)
+    else:
+        novo[noite["data"]] = noite["tipo"]
+    return novo
+
+
+def adultos_por_viagem(lista: list[dict]) -> dict[str, int]:
+    return {v["id"]: _limitar(v.get("adultos") or 1, 1, 9) for v in lista}
+
+
+def mostrar_total_hospedagem(voos_pp: float, hosp: float, sem_preco: int, cs: list, cfg, precos: dict) -> None:
+    """Por pessoa e para o grupo (passagens de 1 pessoa × pessoas + hospedagem), e um botão para buscar agora
+    (no Mac) os preços de hospedagem que faltam."""
+    from monitor.hospedagem import buscar, gravar_precos, juntar, ler_precos, pedidos_faltando
+    n = cfg.hospedes
+    col, lado = st.columns([3, 1.3])
+    with col:
+        linhas = "".join(
+            f"<tr><td><b>{titulo}</b></td><td>{brl(voos_pp * mult)}</td><td>{brl(hosp / div)}</td>"
+            f"<td><b>{brl(voos_pp * mult + hosp / div)}</b></td></tr>"
+            for titulo, mult, div in (("👤 Por pessoa", 1, n), (f"👥 Para {n} pessoas", n, 1)))
+        st.markdown(
+            '<table style="width:100%;font-size:1.15rem;border-collapse:collapse"><tr style="font-size:.85rem;opacity:.75">'
+            "<td></td><td>✈️ Voos</td><td>🏠 Hospedagem</td><td>Total</td></tr>" + linhas + "</table>",
+            unsafe_allow_html=True)
+        st.caption(f"Hospedagem: a opção mais barata entre os seus links para as noites marcadas 🌙; a 2ª mais barata aparece no "
+                   f"calendário, só para comparar (o anúncio cobra "
+                   f"pelas {n} pessoas; por pessoa = dividido por {n}). Passagens: o preço buscado é por pessoa; para "
+                   f"{n}, multiplicado por {n} (se restar só 1 lugar naquele preço, o 2º pode sair mais caro).")
+    faltam = pedidos_faltando([c.reserva for c in cs if c.total is None and c.situacao == "sem_preco"], cfg, precos, 1e9)
+    # busca sozinha (aqui no Mac) o que você acabou de mudar; cada consulta só uma vez por sessão, para não repetir
+    # sem parar se o site não responder (aí fica o botão)
+    tentadas = st.session_state.setdefault("hosp_tentadas", set())
+    novas = [f for f in faltam if f not in tentadas]
+    with lado:
+        if sem_preco:
+            st.warning(f"⏳ {sem_preco} reserva(s) ainda sem preço de hospedagem: o total está incompleto.")
+        auto = bool(novas) and len(novas) <= BUSCA_AUTO_MAX
+        if auto or (faltam and st.button(f"🔎 Buscar agora ({len(faltam)} consulta(s), ~{len(faltam) * 12 // 60 + 1} min)",
+                                         key=f"buscar_hosp_{len(faltam)}")):
+            pedidos = novas if auto else faltam
+            tentadas.update(pedidos)
+            arq = DADOS / "hospedagens.json"
+            with st.spinner(f"Buscando o preço da hospedagem no Airbnb/Booking ({len(pedidos)} consulta(s), "
+                            f"~{len(pedidos) * 12 // 60 + 1} min)…"):
+                dados = ler_precos(arq)
+                ok, falhas = buscar(pedidos, cfg.hospedes, dados["precos"], aviso=lambda _m: None)
+                gravar_precos(juntar(ler_precos(arq), dados), arq)
+            st.toast(f"Hospedagem: {ok} preço(s) encontrado(s)" + (f", {falhas} sem resposta" if falhas else ""), icon="🏠")
+            st.rerun()
+
+
+BUSCA_AUTO_MAX = 8  # até quantas consultas de hospedagem o painel faz sozinho (~12 s cada)
+
+
+def acompanhar_salvas() -> None:
+    """Passa ao cadastro de hospedagem as reservas dos roteiros guardados: assim o GitHub também busca (e atualiza)
+    o preço delas, e não só o dos roteiros sugeridos. Vale no GitHub depois de ☁️ Salvar e publicar."""
+    from monitor.hospedagem import Reserva, gravar_config
+    cfg, _ = hospedagem_atual()
+    if not cfg:
+        return
+    vistas = []
+    for sim in _sim_ler()["salvas"].values():
+        for g, e, s in sim.get("reservas") or []:
+            r = Reserva(g, date.fromisoformat(e), date.fromisoformat(s))
+            if r not in vistas:
+                vistas.append(r)
+    if vistas != cfg.acompanhar:
+        cfg.acompanhar = vistas
+        gravar_config(cfg, PASTA_CONFIG / "hospedagens.yaml")
+
+
+def hospedagem_salva(sim: dict, cfg, precos: dict) -> tuple[float, int]:
+    """(hospedagem com os preços de agora, reservas sem preço) de uma simulação guardada."""
+    from monitor.hospedagem import Reserva, custo, total_hospedagem
+    if not cfg or "reservas" not in sim:
+        return sim.get("hospedagem") or 0.0, 0
+    return total_hospedagem([custo(Reserva(g, date.fromisoformat(e), date.fromisoformat(s)), cfg, precos)
+                             for g, e, s in sim["reservas"]])
+
+
+def hospedagem_atual():
+    """(config, preços) das hospedagens; config None se não houver cadastro."""
+    from monitor.hospedagem import ARQ_CONFIG, ARQ_PRECOS, ler_config, ler_precos
+    try:
+        cfg = ler_config(PASTA_CONFIG / ARQ_CONFIG.name)
+    except Exception:  # noqa: BLE001
+        cfg = None
+    return cfg, ler_precos(DADOS / ARQ_PRECOS.name)["precos"]
 
 
 ARQ_SIMULACOES = Path(__file__).resolve().parent / "simulacoes.json"  # só no Mac (fora do Git)
@@ -658,7 +859,8 @@ def _sim_ler() -> dict:
         d = json.loads(ARQ_SIMULACOES.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         d = {}
-    return {"atual": d.get("atual") or {"marcados": [], "voos": {}}, "salvas": d.get("salvas") or {}}
+    return {"atual": d.get("atual") or {"marcados": [], "voos": {}, "noites": {}}, "salvas": d.get("salvas") or {},
+            "calendario": d.get("calendario") or {}}
 
 
 def _sim_gravar(d: dict) -> None:
@@ -671,6 +873,7 @@ def _sim_carregar(sim: dict) -> None:
         del st.session_state[k]
     st.session_state["sim_marcados"] = list(sim.get("marcados") or [])
     st.session_state["sim_pendente_voos"] = dict(sim.get("voos") or {})
+    st.session_state["sim_noites"] = dict(sim.get("noites") or {})
 
 
 def abrir_no_simulador(cen: Cenario) -> None:
@@ -775,6 +978,12 @@ def tela_simulador() -> None:
     com_hora = [e[4] for e in escolhidos if e[4].partida and e[4].chegada]
     cen = Cenario(com_hora) if com_hora else None
     problemas_sel = problemas_da_simulacao(escolhidos, rotas_lig, nomes)
+    from monitor.hospedagem import custos, noites, total_hospedagem, voos_por_pessoa
+    cfg_h, precos_h = hospedagem_atual()
+    escolhas_n = st.session_state.get("sim_noites", {})
+    ns = noites(com_hora, cfg_h, escolhas_n) if (cfg_h and com_hora) else []
+    cs_h = custos(ns, cfg_h, precos_h) if ns else []
+    hosp, sem_preco_h = total_hospedagem(cs_h)
 
     c1, c2 = st.columns([4, 1])
     with c1:
@@ -791,13 +1000,25 @@ def tela_simulador() -> None:
         if c2.button("Guardar", disabled=not (nome_sim.strip() and marcados)):
             arquivo["salvas"][nome_sim.strip()] = {
                 "marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+                "noites": escolhas_n, "hospedagem": round(hosp, 2),
+                "reservas": [[c.reserva.grupo, c.reserva.entrada.isoformat(), c.reserva.saida.isoformat()] for c in cs_h],
                 "total": round(sum(e[4].preco for e in escolhidos), 2), "quando": datetime.now().isoformat(timespec="minutes")}
             _sim_gravar(arquivo)
+            acompanhar_salvas()
             st.toast(f"Guardada: {nome_sim.strip()}", icon="💾")
         if arquivo["salvas"]:
             nomes_s = list(arquivo["salvas"])
-            esc = st.selectbox("Guardadas", nomes_s, format_func=lambda n: f"{n} · {brl(arquivo['salvas'][n].get('total', 0))} "
-                               f"(guardada em {arquivo['salvas'][n].get('quando', '')[:16].replace('T', ' ')})")
+            def rotulo_salva(n: str) -> str:
+                sv = arquivo["salvas"][n]
+                hosp_s, falta_s = hospedagem_salva(sv, cfg_h, precos_h)
+                voos_s = sv.get("total", 0)  # passagens de 1 pessoa
+                if not cfg_h:
+                    return f"{n} · voos {brl(voos_s)} (guardada em {sv.get('quando', '')[:16].replace('T', ' ')})"
+                k = cfg_h.hospedes
+                return (f"{n} · {brl(voos_s + hosp_s / k)} por pessoa · {brl(voos_s * k + hosp_s)} para {k}"
+                        + (" (falta preço de hospedagem)" if falta_s else "")
+                        + f" (guardada em {sv.get('quando', '')[:16].replace('T', ' ')})")
+            esc = st.selectbox("Guardadas", nomes_s, format_func=rotulo_salva)
             b1, b2, _ = st.columns([1, 1, 3])
             if b1.button("Abrir"):
                 _sim_carregar(arquivo["salvas"][esc])
@@ -805,25 +1026,38 @@ def tela_simulador() -> None:
             if b2.button("Apagar"):
                 arquivo["salvas"].pop(esc, None)
                 _sim_gravar(arquivo)
+                acompanhar_salvas()
                 st.rerun()
-            st.caption("O total mostrado é o da hora em que foi guardada; ao abrir, os preços são os mais recentes.")
+            st.caption("Voos: o total da hora em que foi guardada (ao abrir, os preços são os mais recentes). "
+                       "Hospedagem: o preço mais recente das reservas dessa simulação (o GitHub atualiza a cada 12h, "
+                       "depois de ☁️ Salvar e publicar).")
     # aviso na hora: logo acima do calendário, sem precisar rolar até o fim
     if escolhidos:
-        c1, c2 = st.columns([1, 3])
-        c1.metric("Total marcado", brl(sum(e[4].preco for e in escolhidos)))
-        with c2:
+        if cfg_h and com_hora:
+            mostrar_total_hospedagem(voos_por_pessoa([e[4] for e in escolhidos], adultos_por_viagem(lista)),
+                                     hosp, sem_preco_h, cs_h, cfg_h, precos_h)
             mostrar_problemas(problemas_sel, escolhidos)
+        else:
+            c1, c2 = st.columns([1, 3])
+            c1.metric("Total marcado", brl(sum(e[4].preco for e in escolhidos)))
+            with c2:
+                mostrar_problemas(problemas_sel, escolhidos)
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
                        + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True,
-                                         problemas=problemas_sel)
+                                         problemas=problemas_sel,
+                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None)
                        for a, m in meses_sel)
-    novos = calendario_clicavel(html_cal, marcados, "sim_cal")
+    novos, noite = calendario_clicavel(html_cal, marcados, "sim_cal")
+    if noite:
+        st.session_state["sim_noites"] = trocar_noite(escolhas_n, noite, ns)
+        st.rerun()
     if sorted(novos) != sorted(marcados):
         st.session_state["sim_marcados"] = novos
         st.rerun()
 
     # guarda a simulação atual no Mac (volta igual quando você abrir o painel de novo)
-    atual = {"marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida}}
+    atual = {"marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+             "noites": escolhas_n}
     if atual != arquivo["atual"]:
         arquivo["atual"] = atual
         _sim_gravar(arquivo)
@@ -871,7 +1105,15 @@ def tela_simulador() -> None:
             total += o.preco
             anterior = o
             feitos.append(o)
-    st.metric("Valor total", brl(total), help="Soma dos voos escolhidos (preços da última coleta; podem ter mudado).")
+    if cs_h:
+        n = cfg_h.hospedes
+        pp = voos_por_pessoa([e[4] for e in escolhidos], adultos_por_viagem(lista)) + hosp / n
+        c1, c2 = st.columns(2)
+        c1.metric("Total por pessoa", brl(pp), help="Passagens de 1 pessoa + a sua parte da hospedagem "
+                  "(preços da última coleta; podem ter mudado).")
+        c2.metric(f"Total para {n} pessoas", brl(pp * n))
+    else:
+        st.metric("Valor total", brl(total), help="Soma dos voos escolhidos (preços da última coleta; podem ter mudado).")
     if problemas:
         st.error(f"{problemas} voo(s) se sobrepõem. Troque a data ou o horário marcado em vermelho.")
     else:
@@ -898,18 +1140,25 @@ def tela_calendario() -> None:
     if not ids:
         sem_dados()
         return
+    from monitor.hospedagem import com_hospedagem, custos, noites, total_hospedagem, voos_por_pessoa
+    cfg_h, precos_h = hospedagem_atual()
 
     cen = None
     with st.container(border=True):
         st.subheader("🧭 Roteiros possíveis")
         st.caption("Montados pelas **ligações** que você marca em cada viagem (✏️ → 🔗 \"Esta viagem acontece depois "
                    "de…\"). Cada roteiro escolhe **um voo de cada trecho**, entre todos os voos guardados de cada dia "
-                   "(não só o mais barato), respeitando os intervalos de cada ligação. Os mais baratos aparecem primeiro.")
+                   "(não só o mais barato), respeitando os intervalos de cada ligação. Os mais baratos aparecem primeiro"
+                   + (" por pessoa (passagem + sua parte da hospedagem sugerida; veja 🏠 Hospedagens)." if cfg_h else "."))
         if not any(r.depois_de for r in rotas):
             st.info("Você ainda não marcou ligações. Exemplo: em **Rio→Tampa**, marque \"depois de REC→Galeão ou "
                     "REC→Santos Dumont\", com intervalo de 1 a 5 dias. Aí os roteiros aparecem aqui sozinhos.")
         else:
-            cs, sem_voos = roteiros_pelas_ligacoes(rotas, voos, limite=10)
+            cs, sem_voos = roteiros_pelas_ligacoes(rotas, voos, limite=40 if cfg_h else 10)
+            totais = None
+            if cfg_h:  # ordena por voos + hospedagem sugerida
+                totais = com_hospedagem(cs, cfg_h, precos_h, adultos=adultos_por_viagem(lista))[:10]
+                cs = [rt.cenario for rt in totais]
             if sem_voos:
                 st.caption("Ainda sem voos com horário: " + ", ".join(nomes.get(i, i) for i in sem_voos) +
                            " (esses caminhos ficam de fora por enquanto).")
@@ -921,7 +1170,7 @@ def tela_calendario() -> None:
             if not cs:
                 st.warning("Nenhuma combinação de datas e horários respeita os intervalos das ligações.")
             else:
-                cen = _escolher_cenario(cs, "cen_lig")
+                cen = _escolher_cenario(cs, "cen_lig", totais)
                 _mostrar_cenario(cen, nomes)
                 if st.button("🧮 Abrir este roteiro no simulador", key="abrir_sim_lig"):
                     abrir_no_simulador(cen)
@@ -960,11 +1209,19 @@ def tela_calendario() -> None:
     # roteiro editável: começa com o escolhido acima; você pode desmarcar um voo e marcar outro
     sugeridos = [f"{o.rota_id}|{o.data.isoformat()}" for o in cen.trechos] if cen else []
     assinatura = tuple(f"{o.rota_id}|{o.data.isoformat()}|{o.partida.isoformat()}" for o in cen.trechos) if cen else ()
+    guardado = _sim_ler().get("calendario") or {}
+    if "cal_assinatura" not in st.session_state and guardado.get("marcados"):
+        # página recarregada: volta como você deixou (o "↩️ Voltar" volta ao roteiro sugerido)
+        st.session_state["cal_assinatura"] = assinatura
+        st.session_state["cal_marcados"] = list(guardado["marcados"])
+        st.session_state["cal_voos"] = dict(guardado.get("voos") or {})
+        st.session_state["cal_noites"] = dict(guardado.get("noites") or {})
     if st.session_state.get("cal_assinatura") != assinatura:
         st.session_state["cal_assinatura"] = assinatura
         st.session_state["cal_marcados"] = list(sugeridos)
         st.session_state["cal_voos"] = {f"{o.rota_id}|{o.data.isoformat()}": o.partida.isoformat()
                                         for o in cen.trechos} if cen else {}
+        st.session_state["cal_noites"] = {}
     marcados = [x for x in st.session_state.get("cal_marcados", [])
                 if x.split("|")[0] in op and date.fromisoformat(x.split("|")[1]) in op[x.split("|")[0]]]
     preferidos = st.session_state.get("cal_voos", {})
@@ -978,8 +1235,22 @@ def tela_calendario() -> None:
     com_hora = [e[4] for e in escolhidos if e[4].partida and e[4].chegada]
     cen_ed = Cenario(com_hora) if com_hora else None
     problemas = problemas_da_simulacao(escolhidos, rotas_lig, nomes)
+    escolhas_n = st.session_state.get("cal_noites", {})
+    ns = noites(com_hora, cfg_h, escolhas_n) if (cfg_h and com_hora) else []
+    cs_h = custos(ns, cfg_h, precos_h) if ns else []
+    hosp, sem_preco_h = total_hospedagem(cs_h)
+    alterado = sorted(marcados) != sorted(sugeridos) or bool(escolhas_n)
+    estado = {"marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+              "noites": escolhas_n} if alterado else {}
+    arq_sim = _sim_ler()
+    if (arq_sim.get("calendario") or {}) != estado:
+        arq_sim["calendario"] = estado
+        _sim_gravar(arq_sim)
+    if cfg_h and com_hora:
+        mostrar_total_hospedagem(voos_por_pessoa([e[4] for e in escolhidos], adultos_por_viagem(lista)),
+                                 hosp, sem_preco_h, cs_h, cfg_h, precos_h)
 
-    if sorted(marcados) != sorted(sugeridos):
+    if alterado:
         with st.container(border=True):
             st.markdown("**✏️ Você alterou o roteiro**")
             c1, c2 = st.columns([1, 3])
@@ -995,15 +1266,18 @@ def tela_calendario() -> None:
                 arquivo = _sim_ler()
                 arquivo["salvas"][nome_g.strip()] = {
                     "marcados": marcados, "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida},
+                    "noites": escolhas_n, "hospedagem": round(hosp, 2),
+                    "reservas": [[c.reserva.grupo, c.reserva.entrada.isoformat(), c.reserva.saida.isoformat()] for c in cs_h],
                     "total": round(sum(e[4].preco for e in escolhidos), 2),
                     "quando": datetime.now().isoformat(timespec="minutes")}
                 _sim_gravar(arquivo)
+                acompanhar_salvas()
                 st.toast(f"Guardado: {nome_g.strip()} (em Simular viagem → Simulações salvas)", icon="💾")
             if c3.button("↩️ Voltar", key="cal_voltar", help="Volta ao roteiro escolhido acima"):
                 st.session_state["cal_assinatura"] = None
                 st.rerun()
             if c4.button("🧮 Detalhar", key="cal_detalhar", help="Abre no simulador para escolher o horário de cada voo"):
-                _sim_carregar({"marcados": marcados,
+                _sim_carregar({"marcados": marcados, "noites": escolhas_n,
                                "voos": {e[0]: e[4].partida.isoformat() for e in escolhidos if e[4].partida}})
                 st.session_state["sim_carregado"] = True
                 st.switch_page(PAGINAS["simulador"])
@@ -1016,14 +1290,19 @@ def tela_calendario() -> None:
         return
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
                        + calendario_html(a, m, op, sel, cen_ed, nomes, voos, rotas_lig, clicavel=True,
-                                         problemas=problemas)
+                                         problemas=problemas,
+                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None)
                        for a, m in filtro_meses(meses, "cal_meses"))
-    novos = calendario_clicavel(html_cal, marcados, "cal_clicavel")
+    novos, noite = calendario_clicavel(html_cal, marcados, "cal_clicavel")
+    if noite:
+        st.session_state["cal_noites"] = trocar_noite(escolhas_n, noite, ns)
+        st.rerun()
     if sorted(novos) != sorted(marcados):
         st.session_state["cal_marcados"] = novos
         st.rerun()
     st.caption("Azul ✈️ = voos do roteiro. ❌ vermelho = choque de horário. ⚠️ laranja = fora das ligações que você "
-               "marcou. O fundo mostra em que cidade você estaria em cada dia.")
+               "marcou. O fundo mostra em que cidade você estaria em cada dia. 🌙 = onde você dorme naquela noite: "
+               "troque na lista (noites seguidas no mesmo lugar viram uma reserva só).")
 
 
 def campo_intervalo(chave: str, min_h: float, max_h: float | None) -> tuple[float, float | None]:
@@ -1380,21 +1659,103 @@ def _pendentes() -> list[str]:
         return []
 
 
-def baixar_novidades() -> tuple[bool, str]:
-    """Traz os commits do GitHub (preços novos) e abre o histórico criptografado."""
+def _baixar() -> tuple[bool, str]:
+    """git pull + abre o histórico criptografado (sem mexer na tela: roda também em segundo plano)."""
     from monitor.cofre import abrir
+    from monitor.hospedagem import gravar_precos, juntar, ler_precos
     # merge (e não rebase): no SSD exFAT o macOS cria "._*" no meio do rebase e ele trava (visto em 21/11)
     limpar_auxiliares()
     ok, saida = _cmd("git", "pull", "--no-rebase", "--no-edit")
     if not ok:
+        if (RAIZ / ".git" / "MERGE_HEAD").exists():  # conflito: desfaz, para não deixar o Git no meio do caminho
+            _cmd("git", "merge", "--abort")
         return False, saida
+    hosp_local = ler_precos(DADOS / "hospedagens.json")  # preços buscados aqui no Mac não se perdem
     abertos = abrir(RAIZ, "dados")
+    gravar_precos(juntar(hosp_local, ler_precos(DADOS / "hospedagens.json")), DADOS / "hospedagens.json")
     limpar_auxiliares()
-    st.cache_data.clear()
     return True, f"{len(abertos)} arquivo(s) de dados atualizados."
 
 
+def baixar_novidades() -> tuple[bool, str]:
+    """Traz os commits do GitHub (preços novos) e abre o histórico criptografado."""
+    with sincronia().trava:
+        ok, msg = _baixar()
+    st.cache_data.clear()
+    return ok, msg
+
+
+SINCRONIA_S = 120  # de quanto em quanto tempo o painel confere se o GitHub tem preços novos
+
+
+class _Sincronia:
+    """Confere o GitHub em segundo plano e baixa sozinho os preços novos (de rodadas automáticas ou manuais).
+    As telas abertas percebem pela `versao` e se atualizam."""
+
+    def __init__(self) -> None:
+        import threading
+        self.trava = threading.RLock()   # um comando Git por vez (botões e segundo plano)
+        self.versao = 0
+        self.baixado: datetime | None = None
+        self.erro = ""
+        threading.Thread(target=self._rodar, daemon=True, name="sincronia-github").start()
+
+    def _rodar(self) -> None:
+        import time
+        while True:
+            try:
+                self.conferir()
+            except Exception as e:  # noqa: BLE001 — nunca derruba o painel
+                self.erro = str(e)[:300]
+            time.sleep(SINCRONIA_S)
+
+    def conferir(self) -> None:
+        if not (RAIZ / ".git").exists() or os.getenv("MONITOR_DADOS"):  # painel de teste (cópias): não mexe no Git
+            return
+        with self.trava:
+            ok, saida = _cmd("git", "fetch", "-q", timeout=60)
+            if not ok:
+                self.erro = saida[:300]
+                return
+            ok, n = _cmd("git", "rev-list", "--count", "HEAD..origin/main")
+            if not (ok and n.strip().isdigit() and int(n) > 0):
+                return
+            ok, saida = _baixar()
+        if ok:
+            self.baixado, self.erro = datetime.now(), ""
+            self.versao += 1
+        else:
+            self.erro = saida[:300]
+
+
+@st.cache_resource
+def sincronia() -> _Sincronia:
+    return _Sincronia()
+
+
+@st.fragment(run_every=30)
+def aviso_sincronia() -> None:
+    """Na barra lateral: quando chegam preços novos do GitHub, recarrega a tela sozinha."""
+    s = sincronia()
+    vista = st.session_state.setdefault("sinc_versao", s.versao)
+    if s.versao != vista:
+        st.session_state["sinc_versao"] = s.versao
+        st.cache_data.clear()
+        st.rerun(scope="app")
+    if s.erro:
+        st.caption("⚠️ Não consegui baixar os preços novos do GitHub sozinho. Mostre ao Claude: " + s.erro[:150])
+    elif s.baixado:
+        st.caption(f"🔄 Preços do GitHub baixados sozinhos às {s.baixado:%H:%M} (confere a cada {SINCRONIA_S // 60} min).")
+    else:
+        st.caption(f"🔄 Confere o GitHub a cada {SINCRONIA_S // 60} min e baixa os preços novos sozinho.")
+
+
 def publicar() -> tuple[bool, str]:
+    with sincronia().trava:
+        return _publicar()
+
+
+def _publicar() -> tuple[bool, str]:
     from monitor.cofre import fechar
     mudaram = fechar(RAIZ, "config")
     if mudaram:
@@ -1509,7 +1870,7 @@ def tela_publicar() -> None:
 
     st.subheader("Buscar agora no GitHub")
     st.caption("Não precisa esperar a próxima rodada automática (a cada 2h). Os preços entram no histórico e, "
-               "se baterem as regras, chega aviso no Telegram. Depois de ~10 min, use ⬇️ Baixar preços novos.")
+               "se baterem as regras, chega aviso no Telegram. Quando a busca terminar (~10 a 15 min), o painel baixa os preços novos sozinho.")
     so_sk = st.toggle("Só Skiplagged (não gasta a cota do Google)", value=True)
     rodando = [r for r in execucoes(5) if r["status"] in ("in_progress", "queued", "waiting", "pending")]
     if rodando:
@@ -1543,10 +1904,83 @@ def tela_publicar() -> None:
 
 # ----------------------------------------------------------------- navegação
 st.set_page_config(page_title="Monitor de Passagens", page_icon="✈️", layout="wide")
+def tela_hospedagens() -> None:
+    from monitor.hospedagem import ConfigHosp, Grupo, gravar_config, ler_precos, link_limpo, quarto
+    from monitor.viagens import criar_id
+    st.title("🏠 Hospedagens")
+    st.caption("Onde você dorme em cada cidade. O programa sugere a hospedagem de cada noite pela cidade onde você "
+               "chegou, busca no Airbnb e no Booking o preço dos seus links **para as datas exatas de cada roteiro** e soma com os "
+               "voos. No calendário (🌙) você troca noite por noite. Cidades sem cadastro ficam **sem hospedagem** "
+               "(ex.: Tampa e Nova York: volta para o aeroporto).")
+    cfg, _ = hospedagem_atual()
+    cfg = cfg or ConfigHosp()
+    todos_a = aeroportos()
+    if "hosp_grupos" not in st.session_state:
+        st.session_state["hosp_grupos"] = [{"id": g.id, "nome": g.nome, "aeroportos": list(g.aeroportos),
+                                            "links": "\n".join(g.links)} for g in cfg.grupos]
+    grupos = st.session_state["hosp_grupos"]
+
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 3])
+        hospedes = c1.number_input("Hóspedes", 1, 16, _limitar(cfg.hospedes, 1, 16))
+        casa = c2.multiselect("👪 Casa de família/amigos (não paga)", list(todos_a), default=[a for a in cfg.casa if a in todos_a],
+                              format_func=rotulo, help="Chegando por estes aeroportos, as noites ficam como casa (R$ 0).")
+    for i, g in enumerate(grupos):
+        with st.container(border=True):
+            c1, c2 = st.columns([3, 1])
+            g["nome"] = c1.text_input("Lugar", g["nome"], key=f"hosp_nome_{i}", placeholder="Ex.: Lisboa/Almada")
+            c2.write("")
+            if c2.button("🗑️ Remover", key=f"hosp_del_{i}"):
+                grupos.pop(i)
+                st.rerun()
+            g["aeroportos"] = st.multiselect(
+                "Sugerir este lugar quando eu chegar por", list(todos_a), default=[a for a in g["aeroportos"] if a in todos_a],
+                format_func=rotulo, key=f"hosp_aer_{i}",
+                help="Ex.: chegando pelo Porto (OPO) você dorme em Lisboa: ponha OPO aqui. Pode ficar vazio: aí o lugar "
+                     "só entra quando você escolher na noite.")
+            g["links"] = st.text_area("Links do Airbnb ou do Booking (um por linha)", g["links"], key=f"hosp_links_{i}", height=110)
+            ruins = [l for l in g["links"].splitlines() if l.strip() and not quarto(l)]
+            if ruins:
+                st.warning("Estes não são links de anúncio do Airbnb (…airbnb.com.br/rooms/…) nem de hotel do Booking "
+                           "(…booking.com/hotel/…) e serão ignorados: "
+                           + ", ".join(ruins[:3]))
+    c1, c2, _ = st.columns([1, 1, 2])
+    if c1.button("➕ Novo lugar"):
+        grupos.append({"id": "", "nome": "", "aeroportos": [], "links": ""})
+        st.rerun()
+    if c2.button("💾 Salvar", type="primary"):
+        novos, ids = [], set()
+        for g in grupos:
+            if not g["nome"].strip():
+                continue
+            gid = g["id"] or criar_id(g["nome"], ids)
+            ids.add(gid)
+            links = list(dict.fromkeys(link_limpo(q) for l in g["links"].splitlines() if (q := quarto(l))))
+            novos.append(Grupo(gid, g["nome"].strip(), list(g["aeroportos"]), links))
+        try:
+            gravar_config(ConfigHosp(int(hospedes), list(casa), novos, cfg.acompanhar), PASTA_CONFIG / "hospedagens.yaml")
+        except OSError as e:
+            st.error(f"Não consegui salvar: {e}")
+        else:
+            del st.session_state["hosp_grupos"]
+            st.toast("Hospedagens salvas no Mac. Para valer no GitHub e na página com senha: ☁️ Salvar e publicar.",
+                     icon="💾")
+            st.rerun()
+    dados = ler_precos(DADOS / "hospedagens.json")
+    if dados["precos"]:
+        ok = sum(1 for p in dados["precos"].values() if p.get("total") is not None)
+        st.caption(f"Preços guardados: {ok} com preço, {len(dados['precos']) - ok} sem vaga/fora das regras do anúncio"
+                   + (f" · última busca automática: {fmt_quando(datetime.fromisoformat(dados['ultima_busca']).astimezone(ZoneInfo(FUSO)).isoformat())}"
+                      if dados["ultima_busca"] else "")
+                   + ". O GitHub busca de novo a cada 12h; no calendário há um botão 🔎 para buscar na hora.")
+
+
+
 PAGINAS = {
     "viagens": st.Page(tela_viagens, title="Minhas viagens", icon="✈️", default=True),
     "calendario": st.Page(tela_calendario, title="Calendário e roteiros", icon="📅", url_path="calendario"),
     "simulador": st.Page(tela_simulador, title="Simular viagem", icon="🧮", url_path="simular"),
+    "hospedagens": st.Page(tela_hospedagens, title="Hospedagens", icon="🏠", url_path="hospedagens"),
     "historico": st.Page(tela_historico, title="Preços ao longo do tempo", icon="📈", url_path="historico"),
     "analise": st.Page(tela_analise, title="Melhor dia e horário", icon="🗓️", url_path="analise"),
     "buscas": st.Page(tela_buscas, title="Histórico de buscas", icon="🔎", url_path="buscas"),
@@ -1564,6 +1998,7 @@ def fechar_painel() -> None:
 
 with st.sidebar:
     st.caption("Monitor de Passagens · as mudanças ficam salvas no Mac na hora.")
+    aviso_sincronia()
     if (RAIZ / ".git").exists() and _pendentes():
         st.warning("Há mudanças não publicadas.")
         st.page_link(PAGINAS["publicar"], label="Publicar agora", icon="☁️")

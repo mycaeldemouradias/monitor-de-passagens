@@ -810,3 +810,97 @@ def test_maximo_em_dias_conta_dias_completos():
     assert not encaixa(a, sai(72), 24, 48)        # 3 dias, não
     assert not encaixa(a, sai(23.9), 24, 48)      # mínimo continua exato
     assert encaixa(a, sai(2), 1, 2) and not encaixa(a, sai(2.5), 1, 2)  # em horas: exato
+
+
+def _trecho_h(origem, destino, sai, chega):
+    from monitor.roteiro import Opcao
+    return Opcao("r", origem, destino, sai.date(), None, 100, "s", "", "", datetime(2026, 1, 1), sai, chega)
+
+
+def test_hospedagem_noites_reservas_e_preco():
+    from monitor.hospedagem import ConfigHosp, Grupo, chave, custos, noites, reservas, total_hospedagem
+
+    cfg = ConfigHosp(2, ["MSP"], [Grupo("paris", "Paris", ["CDG", "BVA"], ["https://www.airbnb.com.br/rooms/1",
+                                                                         "https://www.airbnb.com.br/rooms/2"]),
+                                  Grupo("lisboa", "Lisboa", ["LIS", "OPO"], ["https://www.airbnb.com.br/rooms/3"])])
+    trechos = [_trecho_h("TPA", "MSP", datetime(2027, 2, 10, 7), datetime(2027, 2, 10, 12)),
+               _trecho_h("MSP", "CDG", datetime(2027, 2, 13, 20), datetime(2027, 2, 15, 11)),   # 2 noites no avião
+               _trecho_h("BVA", "OPO", datetime(2027, 2, 18, 6), datetime(2027, 2, 18, 8)),     # chega no Porto…
+               _trecho_h("LIS", "REC", datetime(2027, 3, 1, 17), datetime(2027, 3, 1, 23))]     # …e sai de Lisboa
+    ns = noites(trechos, cfg)
+    tipo = {n.data.day if n.data.month == 2 else 100 + n.data.day: n.tipo for n in ns}
+    assert tipo[10] == tipo[12] == "casa" and tipo[13] == tipo[14] == "aviao"
+    assert tipo[15] == tipo[17] == "g:paris" and tipo[18] == tipo[28] == "g:lisboa"
+    assert [(r.grupo, r.entrada.day, r.saida.day, r.noites) for r in reservas(ns)] == [
+        ("paris", 15, 18, 3), ("lisboa", 18, 1, 11)]
+
+    # você troca a 1ª noite de Paris por "sem hospedagem": a reserva vira 16→18
+    ns2 = noites(trechos, cfg, {"2027-02-15": "sem"})
+    assert [(r.entrada.day, r.saida.day) for r in reservas(ns2)][0] == (16, 18)
+    # e noites separadas viram duas reservas
+    ns3 = noites(trechos, cfg, {"2027-02-16": "sem"})
+    assert [(r.grupo, r.entrada.day, r.saida.day) for r in reservas(ns3)][:2] == [("paris", 15, 16), ("paris", 17, 18)]
+
+    e, s, l_e, l_s = date(2027, 2, 15), date(2027, 2, 18), date(2027, 2, 18), date(2027, 3, 1)
+    precos = {chave("1", e, s, 2): {"total": 900.0, "nome": "A", "coleta": "2026-11-21T10:00+00:00"},
+              chave("2", e, s, 2): {"total": 700.0, "nome": "B", "coleta": "2026-11-21T10:00+00:00"},
+              chave("3", l_e, l_s, 2): {"total": None, "motivo": "Estadia mínima", "coleta": "2026-11-21T10:00+00:00"}}
+    cs = custos(ns, cfg, precos)
+    assert cs[0].total == 700.0 and cs[0].nome == "B" and "check_in=2027-02-15" in cs[0].link
+    assert cs[0].segunda[:2] == (900.0, "A") and "rooms/1" in cs[0].segunda[2]   # a 2ª mais barata, só para mostrar
+    assert cs[1].total is None and cs[1].situacao == "indisponivel"
+    assert total_hospedagem(cs) == (700.0, 1)
+
+
+def test_hospedagem_le_a_pagina_do_airbnb_e_junta_precos():
+    from monitor.hospedagem import juntar, ler_pagina, quarto
+
+    assert ler_pagina("14 noites em Almada\nTotal:\xa0\nO preço original era R$ 2.507 e o novo preço total é R$ 2.251") == (2251.0, "")
+    assert ler_pagina("2 noites\nTotal: R$\xa0896\nOu 6x R$ 149") == (896.0, "")
+    assert ler_pagina("1 noite\nAdicione datas para ver os preços\nEstadia mínima é de 2 dias")[0] is None
+    assert ler_pagina("carregando…") == (None, "?")
+    assert quarto("https://www.airbnb.com.br/rooms/47264426?adults=2&check_in=2027-02-14") == "47264426"
+    assert quarto("https://www.booking.com/hotel/x") is None
+    a = {"precos": {"k": {"total": 1, "coleta": "2026-11-21T10:00"}}, "ultima_busca": None}
+    b = {"precos": {"k": {"total": 2, "coleta": "2026-11-21T08:00"}, "j": {"total": 3, "coleta": "x"}},
+         "ultima_busca": "2026-11-21T08:00"}
+    assert juntar(a, b)["precos"]["k"]["total"] == 1 and "j" in juntar(a, b)["precos"]
+
+
+def test_hospedagem_booking():
+    from monitor.hospedagem import ler_quartos_booking, link_com_datas, link_limpo, quarto
+
+    q = quarto("https://www.booking.com/hotel/fr/chevallier.pt-br.html?label=x&checkin=2027-02-15")
+    assert q == "booking:fr/chevallier" and link_limpo(q) == "https://www.booking.com/hotel/fr/chevallier.pt-br.html"
+    assert "checkin=2027-02-16&checkout=2027-02-18&group_adults=2" in link_com_datas(q, "2027-02-16", "2027-02-18", 2)
+    linhas = [["R$\xa0499", "+R$\xa028 em impostos e taxas", "Máx. pessoas: 2"],
+              ["R$\xa0395", "+R$\xa022 em impostos e taxas", "Máx. pessoas: 1"],   # só cabe 1: fora
+              ["R$\xa0665", "+R$\xa098 em impostos e taxas", ""]]
+    assert ler_quartos_booking(linhas, 2) == 527.0
+    assert ler_quartos_booking(linhas[1:2], 2) is None
+
+
+def test_total_por_pessoa_e_para_o_grupo():
+    from monitor.hospedagem import ConfigHosp, Grupo, chave, com_hospedagem
+    from monitor.roteiro import Cenario
+
+    cfg = ConfigHosp(2, [], [Grupo("paris", "Paris", ["CDG"], ["https://www.airbnb.com.br/rooms/1"])])
+    a = _trecho_h("MSP", "CDG", datetime(2027, 2, 14, 8), datetime(2027, 2, 15, 9))
+    b = _trecho_h("CDG", "LIS", datetime(2027, 2, 17, 9), datetime(2027, 2, 17, 11))
+    precos = {chave("1", date(2027, 2, 15), date(2027, 2, 17), 2): {"total": 600.0, "coleta": "2026-11-21T10:00"}}
+    rt = com_hospedagem([Cenario([a, b])], cfg, precos)[0]     # passagens de 100 cada, 1 adulto
+    assert (rt.voos_pp, rt.hospedagem, rt.hosp_pp, rt.total, rt.total_grupo) == (200, 600, 300, 500, 1000)
+    rt2 = com_hospedagem([Cenario([a, b])], cfg, precos, adultos={"r": 2})[0]  # busca já com 2 adultos
+    assert rt2.voos_pp == 100 and rt2.total_grupo == 800
+
+
+def test_hospedagem_acompanha_reservas_guardadas(tmp_path):
+    from monitor.hospedagem import ConfigHosp, Grupo, Reserva, gravar_config, ler_config
+
+    arq = tmp_path / "hospedagens.yaml"
+    cfg = ConfigHosp(2, ["MSP"], [Grupo("porto", "Porto", [], ["https://www.airbnb.com.br/rooms/9"])],
+                     [Reserva("porto", date(2027, 2, 18), date(2027, 2, 19))])
+    gravar_config(cfg, arq)
+    lido = ler_config(arq)
+    assert lido.acompanhar == [Reserva("porto", date(2027, 2, 18), date(2027, 2, 19))]
+    assert lido.grupos[0].links == ["https://www.airbnb.com.br/rooms/9"]

@@ -41,7 +41,8 @@ def _mais_baratos_do_dia(chips: list) -> dict:
 
 def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
                     voos: dict | None = None, rotas_lig: dict | None = None, clicavel: bool = False,
-                    problemas: dict | None = None) -> str:
+                    problemas: dict | None = None, noites: dict | None = None,
+                    adultos: dict | None = None) -> str:
     import calendar
     import html
 
@@ -122,12 +123,14 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
                     icone = "❌ " if tipo == "sobrepoe" else "⚠️ "
                     titulo = html.escape(motivo) + " · " + titulo
                 marca_id = ""
-                if clicavel:  # dados para a página com senha somar o total e achar choques no navegador
-                    marca_id = (f' data-id="{html.escape(r)}|{dia.isoformat()}" data-preco="{o.preco:.2f}"'
+                if clicavel:  # dados para a página com senha somar o total (por pessoa) e achar choques no navegador
+                    marca_id = (f' data-id="{html.escape(r)}|{dia.isoformat()}" data-preco="{o.preco / max((adultos or {}).get(r, 1), 1):.2f}"'
                                 + (f' data-partida="{o.partida:%Y-%m-%dT%H:%M}" data-chegada="{o.chegada:%Y-%m-%dT%H:%M}"'
                                    if o.partida and o.chegada else ""))
                 cel.append(f'<div class="{classes}"{marca_id} title="{html.escape(titulo)}">{icone}{o.origem}→{o.destino} '
                            f'<b>{html.escape(brl(o.preco))}</b>{hora}</div>')
+            if not fora and noites and dia in noites:
+                cel.append(_faixa_noite(dia, noites[dia], clicavel))
             linhas.append(f'<td class="{"fora" if fora else ""}"{estilo}>{"".join(cel)}</td>')
         linhas.append("</tr>")
     linhas.append("</table>")
@@ -145,5 +148,61 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
     .cal .chip.conflito{border:1px dashed #dc2626}
     .cal .chip.problema{background:#dc2626 !important;color:#fff !important;border:none !important}
     .cal .chip.foraregra{background:#f59e0b !important;color:#111827 !important;border:none !important}
+    .cal .noite{margin-top:5px;border-top:1px dashed #6b7280;padding-top:3px;font-size:11px;line-height:1.3}
+    .cal .noite .nt{display:block;opacity:.85}
+    .cal .noite.paga .nt b{color:#9a3412}
+    .cal .noite select{font-size:11px;max-width:100%;padding:1px 2px;border:1px solid #9ca3af;border-radius:4px;background:#fff;color:#111827}
+    .cal .noite a{color:#1d4ed8}
     </style>"""
     return css + "".join(linhas)
+
+
+def _faixa_noite(dia: date, n: dict, editavel: bool) -> str:
+    """🌙 onde você dorme na noite que começa neste dia (escolha + preço da reserva)."""
+    import html
+    if n["tipo"] == "aviao" or not editavel:
+        rotulo = html.escape(n["rotulo"])
+    else:
+        opts = "".join(f'<option value="{html.escape(v)}"{" selected" if v == n["tipo"] else ""}>{html.escape(r)}</option>'
+                       for v, r in n["opcoes"])
+        rotulo = f'<select data-noite="{dia.isoformat()}">{opts}</select>'
+    classe = "noite paga" if n["tipo"].startswith("g:") else "noite"
+    return f'<div class="{classe}">🌙 {rotulo}<span class="nt">{n.get("texto", "")}</span></div>'
+
+
+def noites_do_calendario(ns: list, cs: list, cfg) -> dict:
+    """{dia: {tipo, rotulo, opcoes, texto}} para desenhar as noites do roteiro no calendário."""
+    import html
+    opcoes = cfg.opcoes()
+    nomes = dict(opcoes) | {"aviao": "✈️ No avião"}
+    por_dia: dict = {}
+    for c in cs:
+        r = c.reserva
+        d = r.entrada
+        while d < r.saida:
+            por_dia[d] = c
+            d += timedelta(days=1)
+    saida = {}
+    for n in ns:
+        texto = ""
+        c = por_dia.get(n.data)
+        if c:
+            if n.data == c.reserva.entrada:
+                periodo = f"{c.reserva.noites} noite(s), {c.reserva.entrada:%d/%m}→{c.reserva.saida:%d/%m}"
+                if c.total is not None:
+                    link = f' · <a href="{html.escape(c.link)}" target="_blank" rel="noopener">abrir</a>' if c.link else ""
+                    texto = f"<b>{html.escape(brl(c.total))}</b> · {periodo} · {html.escape(c.nome[:28])}{link}"
+                    if c.segunda:
+                        t2, n2, l2 = c.segunda
+                        a2 = f' · <a href="{html.escape(l2)}" target="_blank" rel="noopener">abrir</a>' if l2 else ""
+                        texto += f"<br>2ª: {html.escape(brl(t2))} · {html.escape(n2[:28])}{a2}"
+                elif c.situacao == "indisponivel":
+                    texto = f"⚠️ nenhum dos seus links serve ({periodo})"
+                else:
+                    texto = f"⏳ preço ainda não buscado ({periodo})"
+            else:
+                texto = "↳ mesma reserva"
+        elif n.tipo != "aviao" and n.tipo != n.sugerido:
+            texto = "(você mudou)"
+        saida[n.data] = {"tipo": n.tipo, "rotulo": nomes.get(n.tipo, n.tipo), "opcoes": opcoes, "texto": texto}
+    return saida

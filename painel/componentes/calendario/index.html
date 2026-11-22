@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <!-- Calendário clicável do simulador: mostra o mesmo HTML do calendário do painel e devolve ao
-     Streamlit a lista de voos marcados (protocolo de componentes do Streamlit, sem bibliotecas). -->
+     Streamlit a lista de voos marcados e a noite trocada (protocolo de componentes do Streamlit, sem bibliotecas). -->
 <style>
   body { margin: 0; font-family: "Source Sans Pro", "Source Sans 3", system-ui, sans-serif; background: transparent; }
   h4 { margin: 18px 0 8px; font-size: 1.15rem; color: var(--titulo, #fafafa); }
@@ -40,8 +40,14 @@
         const id = el.dataset.id;
         selecionados.has(id) ? selecionados.delete(id) : selecionados.add(id);
         marcar();
-        enviar("streamlit:setComponentValue", { value: Array.from(selecionados), dataType: "json" });
+        enviar("streamlit:setComponentValue", { value: { voos: Array.from(selecionados) }, dataType: "json" });
       };
+    });
+    // 🌙 onde dorme: devolve só a noite que você trocou (com a hora, para contar como mudança nova)
+    document.querySelectorAll("select[data-noite]").forEach(el => {
+      el.onchange = () => enviar("streamlit:setComponentValue", { value: {
+        voos: Array.from(selecionados), noite: { data: el.dataset.noite, tipo: el.value, t: Date.now() } },
+        dataType: "json" });
     });
     altura();
   });
