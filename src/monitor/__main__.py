@@ -17,6 +17,7 @@ import random
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -111,6 +112,7 @@ def executar(args: argparse.Namespace) -> int:
             if (args.fontes and fonte not in args.fontes) or fonte in (args.excluir_fontes or []):
                 continue
             consultas_por_fonte[fonte].extend(consultas_da_rota(rota, cfg.geral.moeda))
+    consultas_por_fonte, copias = _sem_repetidas(consultas_por_fonte)
     if args.so_faltantes:
         # repescagem: só as buscas que nenhum computador conseguiu fazer (ex.: um deles foi bloqueado)
         feitas = set()
@@ -228,6 +230,15 @@ def executar(args: argparse.Namespace) -> int:
                 feitas.add(f"{c.chave}|{nome_fonte}")
                 if not args.simular:
                     estado.marcar_consulta(nome_fonte, c.chave, inicio)
+                # a mesma busca pedida por outras viagens: o resultado vale para todas
+                for cc in copias.get((nome_fonte, c.chave), []):
+                    feitas.add(f"{cc.chave}|{nome_fonte}")
+                    if not args.simular:
+                        estado.marcar_consulta(nome_fonte, cc.chave, inicio)
+                    if achadas:
+                        mesmas = [replace(o, consulta=cc, avisos=list(o.avisos)) for o in achadas]
+                        achadas_por_busca[f"{cc.chave}|{nome_fonte}"] = mesmas
+                        ofertas.append(min(mesmas, key=lambda o: o.preco))
                 if achadas:
                     achadas_por_busca[f"{c.chave}|{nome_fonte}"] = achadas
                     r["com_preco"] += 1
@@ -318,6 +329,24 @@ def executar(args: argparse.Namespace) -> int:
              len(ofertas), len(alertas), falhas, tentativas)
     # falha o job só se TUDO falhou (o GitHub avisa por e-mail quando o job falha)
     return 1 if tentativas and falhas == tentativas else 0
+
+
+def _sem_repetidas(por_fonte: dict[str, list[Consulta]]) -> tuple[dict[str, list[Consulta]], dict]:
+    """Viagens diferentes podem pedir a mesma busca (ex.: Paris→Lisboa de 16 a 18/02 e de 08 a 22/02).
+    Cada busca igual (mesmo trecho, datas, adultos e cabine) é feita uma vez só; as outras viagens recebem
+    o mesmo resultado. Devolve as buscas sem repetição e {(fonte, chave feita): [consultas copiadas]}."""
+    unicas: dict[str, list[Consulta]] = defaultdict(list)
+    copias: dict[tuple[str, str], list[Consulta]] = defaultdict(list)
+    for fonte, cs in por_fonte.items():
+        primeira: dict[tuple, Consulta] = {}
+        for c in cs:
+            k = (c.origem, c.destino, c.ida, c.volta, c.adultos, c.cabine, c.moeda)
+            if k in primeira:
+                copias[(fonte, primeira[k].chave)].append(c)
+            else:
+                primeira[k] = c
+                unicas[fonte].append(c)
+    return unicas, copias
 
 
 def _voos_atuais(arq_csv: Path, arq_voos: Path, ofertas: list[Oferta], achadas: dict[str, list[Oferta]],

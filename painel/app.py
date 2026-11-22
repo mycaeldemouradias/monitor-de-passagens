@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -724,6 +725,23 @@ def chaves_atuais(lista: list[dict]) -> set[str]:
     return chaves
 
 
+def visao_limpa(chave: str, marcados: list[str]) -> set | None:
+    """Botão "Visão limpa": o calendário mostra só os voos escolhidos. Devolve {(viagem, data)} ou None."""
+    limpa = st.toggle("🧹 Visão limpa (só os voos escolhidos)", key=chave,
+                      help="Esconde as outras passagens. Desligue para voltar a ver todas.")
+    if not limpa:
+        return None
+    if not marcados:
+        st.caption("Nenhum voo escolhido ainda: mostrando todas as passagens.")
+        return None
+    return {(x.split("|")[0], date.fromisoformat(x.split("|")[1])) for x in marcados}
+
+
+def meses_da_visao(meses_sel: list[tuple[int, int]], somente: set | None) -> list[tuple[int, int]]:
+    """Na visão limpa, os meses dos voos escolhidos (mesmo que não estejam no filtro de meses)."""
+    return sorted({(d.year, d.month) for _, d in somente}) if somente else meses_sel
+
+
 def filtro_meses(meses: list[tuple[int, int]], chave: str) -> list[tuple[int, int]]:
     """Escolher quais meses mostrar (um ou vários). Padrão: a partir do mês atual."""
     hoje = date.today()
@@ -991,8 +1009,9 @@ def tela_simulador() -> None:
         meses_sel = filtro_meses(meses, "sim_meses")
     with c2:
         st.write("")
-        if st.button("🧹 Limpar seleção"):
+        if st.button("🗑️ Limpar seleção"):
             _sim_carregar({})
+            st.session_state["sim_limpa"] = False
             st.rerun()
     with st.expander("💾 Simulações salvas"):
         c1, c2 = st.columns([3, 1])
@@ -1022,6 +1041,7 @@ def tela_simulador() -> None:
             b1, b2, _ = st.columns([1, 1, 3])
             if b1.button("Abrir"):
                 _sim_carregar(arquivo["salvas"][esc])
+                st.session_state["sim_limpa"] = True  # simulação salva: o calendário mostra só ela
                 st.rerun()
             if b2.button("Apagar"):
                 arquivo["salvas"].pop(esc, None)
@@ -1042,11 +1062,13 @@ def tela_simulador() -> None:
             c1.metric("Total marcado", brl(sum(e[4].preco for e in escolhidos)))
             with c2:
                 mostrar_problemas(problemas_sel, escolhidos)
+    somente = visao_limpa("sim_limpa", marcados)
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
                        + calendario_html(a, m, op, list(op), cen, nomes, voos, rotas_lig, clicavel=True,
                                          problemas=problemas_sel,
-                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None)
-                       for a, m in meses_sel)
+                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None,
+                                         somente=somente)
+                       for a, m in meses_da_visao(meses_sel, somente))
     novos, noite = calendario_clicavel(html_cal, marcados, "sim_cal")
     if noite:
         st.session_state["sim_noites"] = trocar_noite(escolhas_n, noite, ns)
@@ -1288,11 +1310,14 @@ def tela_calendario() -> None:
     if not meses:
         st.info("Escolha ao menos uma viagem.")
         return
+    meses_sel = filtro_meses(meses, "cal_meses")
+    somente = visao_limpa("cal_limpa", marcados)
     html_cal = "".join(f"<h4>{MESES[m - 1].capitalize()} de {a}</h4>"
-                       + calendario_html(a, m, op, sel, cen_ed, nomes, voos, rotas_lig, clicavel=True,
-                                         problemas=problemas,
-                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None)
-                       for a, m in filtro_meses(meses, "cal_meses"))
+                       + calendario_html(a, m, op, ids if somente else sel, cen_ed, nomes, voos, rotas_lig,
+                                         clicavel=True, problemas=problemas,
+                                         noites=noites_do_calendario(ns, cs_h, cfg_h) if ns else None,
+                                         somente=somente)
+                       for a, m in meses_da_visao(meses_sel, somente))
     novos, noite = calendario_clicavel(html_cal, marcados, "cal_clicavel")
     if noite:
         st.session_state["cal_noites"] = trocar_noite(escolhas_n, noite, ns)
@@ -1686,15 +1711,20 @@ def baixar_novidades() -> tuple[bool, str]:
 
 
 SINCRONIA_S = 120  # de quanto em quanto tempo o painel confere se o GitHub tem preços novos
+RESERVA_H = 2.25   # o GitHub ficou mais que isso sem começar uma busca: o Mac dispara uma (reserva do relógio)
+RESERVA_CONFERE_S = 600
 
 
 class _Sincronia:
     """Confere o GitHub em segundo plano e baixa sozinho os preços novos (de rodadas automáticas ou manuais).
     As telas abertas percebem pela `versao` e se atualizam."""
 
-    def __init__(self) -> None:
+    def __init__(self, pedido: dict) -> None:
         import threading
         self.trava = threading.RLock()   # um comando Git por vez (botões e segundo plano)
+        self.pedido = pedido             # o mesmo do botão "Buscar agora" (evita pedir 2 buscas)
+        self.disparou: datetime | None = None
+        self._vigiado = 0.0
         self.versao = 0
         self.baixado: datetime | None = None
         self.erro = ""
@@ -1705,9 +1735,34 @@ class _Sincronia:
         while True:
             try:
                 self.conferir()
+                if time.time() - self._vigiado >= RESERVA_CONFERE_S:
+                    self._vigiado = time.time()
+                    self.vigiar()
             except Exception as e:  # noqa: BLE001 — nunca derruba o painel
                 self.erro = str(e)[:300]
             time.sleep(SINCRONIA_S)
+
+    def vigiar(self) -> None:
+        """Reserva do relógio do GitHub: com o painel aberto, se nenhuma busca começou nas últimas 2h15
+        (e nenhuma está rodando ou na fila), o Mac pede uma."""
+        if not (RAIZ / ".git").exists() or os.getenv("MONITOR_DADOS"):
+            return
+        runs = execucoes(5)
+        if not runs or any(r["status"] != "completed" for r in runs):
+            return
+        ultima = max(datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00")) for r in runs)
+        if datetime.now(timezone.utc) - ultima < timedelta(hours=RESERVA_H):
+            return
+        with self.pedido["trava"]:
+            if time.time() - self.pedido["quando"] < 120:
+                return
+            self.pedido["quando"] = time.time()
+            ok, saida = _cmd("gh", "workflow", "run", "monitor.yml", "--repo", REPO, timeout=30)
+            if ok:
+                self.disparou = datetime.now()
+            else:
+                self.pedido["quando"] = 0.0
+                self.erro = saida[:300]
 
     def conferir(self) -> None:
         if not (RAIZ / ".git").exists() or os.getenv("MONITOR_DADOS"):  # painel de teste (cópias): não mexe no Git
@@ -1730,7 +1785,14 @@ class _Sincronia:
 
 @st.cache_resource
 def sincronia() -> _Sincronia:
-    return _Sincronia()
+    return _Sincronia(ultimo_pedido())
+
+
+@st.cache_resource
+def ultimo_pedido() -> dict:
+    """Hora do último "Buscar agora" (vale para todas as abas abertas do painel)."""
+    import threading
+    return {"quando": 0.0, "trava": threading.Lock()}
 
 
 @st.fragment(run_every=30)
@@ -1748,6 +1810,8 @@ def aviso_sincronia() -> None:
         st.caption(f"🔄 Preços do GitHub baixados sozinhos às {s.baixado:%H:%M} (confere a cada {SINCRONIA_S // 60} min).")
     else:
         st.caption(f"🔄 Confere o GitHub a cada {SINCRONIA_S // 60} min e baixa os preços novos sozinho.")
+    if s.disparou:
+        st.caption(f"⏰ O GitHub passou de 2h sem buscar: o Mac pediu uma busca às {s.disparou:%H:%M}.")
 
 
 def publicar() -> tuple[bool, str]:
@@ -1775,7 +1839,7 @@ def _publicar() -> tuple[bool, str]:
 
 
 def execucoes(limite: int = 8) -> list[dict]:
-    ok, saida = _cmd("gh", "run", "list", "--repo", REPO, "--limit", str(limite), "--json",
+    ok, saida = _cmd("gh", "run", "list", "--repo", REPO, "--workflow", "monitor.yml", "--limit", str(limite), "--json",
                      "databaseId,status,conclusion,createdAt,event,url,displayTitle", timeout=30)
     return json.loads(saida) if ok and saida.startswith("[") else []
 
@@ -1870,18 +1934,27 @@ def tela_publicar() -> None:
 
     st.subheader("Buscar agora no GitHub")
     st.caption("Não precisa esperar a próxima rodada automática (a cada 2h). Os preços entram no histórico e, "
-               "se baterem as regras, chega aviso no Telegram. Quando a busca terminar (~10 a 15 min), o painel baixa os preços novos sozinho.")
+               "se baterem as regras, chega aviso no Telegram. Quando a busca terminar (~30 a 45 min), o painel baixa os preços novos sozinho.")
     so_sk = st.toggle("Só Skiplagged (não gasta a cota do Google)", value=True)
     rodando = [r for r in execucoes(5) if r["status"] in ("in_progress", "queued", "waiting", "pending")]
-    if rodando:
+    # o GitHub leva alguns segundos para mostrar a busca pedida: sem isto, um 2º clique pedia outra igual
+    pedido = ultimo_pedido()
+    recente = time.time() - pedido["quando"] < 120
+    if rodando or recente:
         st.info("Já tem uma busca rodando no GitHub. Espere ela terminar (acompanhe em Últimas execuções) "
                 "antes de pedir outra.")
-    if st.button("▶️ Buscar agora", disabled=bool(rodando)):
-        args = ["gh", "workflow", "run", "monitor.yml", "--repo", REPO]
-        if so_sk:
-            args += ["-f", "fontes=skiplagged"]
-        ok, saida = _cmd(*args, timeout=30)
-        (st.success if ok else st.error)("Pedido enviado. Acompanhe abaixo em Últimas execuções." if ok else saida)
+    if st.button("▶️ Buscar agora", disabled=bool(rodando or recente)):
+        with pedido["trava"]:
+            if time.time() - pedido["quando"] >= 120:
+                pedido["quando"] = time.time()
+                args = ["gh", "workflow", "run", "monitor.yml", "--repo", REPO]
+                if so_sk:
+                    args += ["-f", "fontes=skiplagged"]
+                ok, saida = _cmd(*args, timeout=30)
+                if not ok:
+                    pedido["quando"] = 0.0
+                (st.success if ok else st.error)("Pedido enviado. Acompanhe abaixo em Últimas execuções."
+                                                 if ok else saida)
 
     st.subheader("Últimas execuções no GitHub")
     runs = execucoes()

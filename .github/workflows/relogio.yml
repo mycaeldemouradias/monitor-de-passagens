@@ -1,0 +1,47 @@
+name: Relógio (próxima busca)
+
+# O agendamento do GitHub ("a cada 2h") falha muito no plano gratuito (em 22/11/2026 rodou 2 vezes no dia).
+# Por isso, no fim de cada busca, o monitor chama este relógio: ele espera completar 2h desde o início
+# daquela busca e dispara a próxima. O agendamento continua como reserva, e o painel do Mac também
+# dispara uma busca se o GitHub passar de 2h15 sem buscar.
+on:
+  workflow_dispatch:
+    inputs:
+      inicio:
+        description: "Início da busca que acabou (UTC)"
+        type: string
+        required: true
+
+permissions:
+  actions: write   # para disparar a próxima busca
+
+# só um relógio esperando por vez: uma busca nova substitui o relógio anterior
+concurrency:
+  group: relogio
+  cancel-in-progress: true
+
+jobs:
+  esperar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Esperar completar 2h desde o início da última busca
+        env:
+          INICIO: ${{ inputs.inicio }}
+        run: |
+          falta=$(( $(date -d "$INICIO" +%s) + 7200 - $(date +%s) ))
+          echo "Próxima busca em $(( falta > 0 ? falta / 60 : 0 )) min."
+          if [ "$falta" -gt 0 ]; then sleep "$falta"; fi
+      - name: Disparar a próxima busca (se nenhuma outra começou nesse meio-tempo)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ativas=$(gh run list --workflow monitor.yml --limit 10 --json status -q '[.[] | select(.status != "completed")] | length')
+          if [ "$ativas" -gt 0 ]; then echo "Já tem busca rodando ou na fila."; exit 0; fi
+          ultima=$(gh run list --workflow monitor.yml --limit 1 --json createdAt -q '.[0].createdAt')
+          if [ -n "$ultima" ] && [ $(( $(date +%s) - $(date -d "$ultima" +%s) )) -lt 6000 ]; then
+            echo "Uma busca começou há menos de 100 min."; exit 0
+          fi
+          gh workflow run monitor.yml
+          echo "Próxima busca disparada."

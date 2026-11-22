@@ -333,3 +333,21 @@ jobs:
         run: sleep 15   # em 22/11/2026 o deploy procurou a página 0,4 s depois do envio e não achou
       - id: publicar
         uses: actions/deploy-pages@v4
+
+  # chama o relógio, que espera completar 2h desde o início desta busca e dispara a próxima
+  proxima:
+    needs: pagina
+    if: ${{ always() && inputs.simular != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Agendar a próxima busca
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          inicio=$(gh run view ${{ github.run_id }} --json createdAt -q .createdAt)
+          gh workflow run relogio.yml -f inicio="$inicio"
+          echo "Relógio ligado: próxima busca 2h depois de $inicio."

@@ -42,7 +42,8 @@ def _mais_baratos_do_dia(chips: list) -> dict:
 def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario | None, nomes: dict,
                     voos: dict | None = None, rotas_lig: dict | None = None, clicavel: bool = False,
                     problemas: dict | None = None, noites: dict | None = None,
-                    adultos: dict | None = None) -> str:
+                    adultos: dict | None = None, somente: set | None = None) -> str:
+    """`somente`: {(viagem, data)} — "visão limpa", mostra só esses voos (ex.: os do roteiro escolhido)."""
     import calendar
     import html
 
@@ -90,7 +91,8 @@ def calendario_html(ano: int, mes: int, op: dict, sel: list[str], cen: Cenario |
             if not fora and dia in local:
                 marca = "" if local[dia].startswith("✈️") else "📍 "
                 cel.append(f'<div class="loc">{marca}{html.escape(local[dia])}</div>')
-            chips = [] if fora else [o for r in sel if (o := op.get(r, {}).get(dia))]
+            chips = [] if fora else [o for r in sel if (o := op.get(r, {}).get(dia))
+                                     and (somente is None or (r, dia) in somente)]
             baratos = _mais_baratos_do_dia(chips)
             for o in sorted(chips, key=lambda o: o.preco):
                 r = o.rota_id

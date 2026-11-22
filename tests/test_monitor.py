@@ -556,6 +556,34 @@ def test_partes_em_varios_computadores_e_juntar(tmp_path, monkeypatch):
     assert len(linhas) == 6 and len(buscadas) == 5
 
 
+def test_busca_repetida_entre_viagens_e_feita_uma_vez(tmp_path, monkeypatch):
+    """Duas viagens com o mesmo trecho e datas que se cruzam: cada data é buscada 1 vez e vale para as duas."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("MONITOR_CHAVE", Fernet.generate_key().decode())
+    rotas = tmp_path / "rotas.yaml"
+    rotas.write_text("geral: {resumo_diario_hora: null}\nrotas:\n"
+                     "  - {id: curta, origem: CDG, destino: LIS, ida: {de: '2099-02-16', ate: '2099-02-18'}, fontes: [skiplagged]}\n"
+                     "  - {id: longa, origem: CDG, destino: LIS, ida: {de: '2099-02-15', ate: '2099-02-19'}, fontes: [skiplagged]}\n",
+                     encoding="utf-8")
+    buscadas = []
+
+    class Falsa:
+        limite_por_execucao, usa_navegador, pausa_s = None, False, None
+        def disponivel(self): return True, ""
+        def buscar(self, c):
+            buscadas.append(c.ida.day)
+            return [Oferta(c, "skiplagged", 100.0 + c.ida.day, ida=None)]
+        def fechar(self): pass
+
+    monkeypatch.setattr(cli, "criar_fonte", lambda *a, **k: Falsa())
+    monkeypatch.setattr(cli.notificacao, "enviar", lambda t: {})
+    assert cli.main(["--config", str(rotas), "--sites", str(tmp_path / "x"), "--dados", str(tmp_path / "d")]) == 0
+    assert sorted(buscadas) == [15, 16, 17, 18, 19]
+    linhas = (tmp_path / "d" / "historico_precos.csv").read_text().strip().splitlines()[1:]
+    assert sorted(l.split(",")[2] for l in linhas) == ["curta"] * 3 + ["longa"] * 5
+
+
 def test_telegram_manda_para_todas_as_conversas(monkeypatch):
     from monitor import notificacao
 
