@@ -1660,10 +1660,32 @@ def limpar_auxiliares() -> int:
     return n
 
 
-def _cmd(*args: str, timeout: int = 120) -> tuple[bool, str]:
-    """Roda git/gh na pasta do projeto. Devolve (deu_certo, saída)."""
+DONO = REPO.split("/")[0]  # a conta do GitHub dona do monitor
+
+
+def _token_do_dono() -> str | None:
+    """Token da conta dona, mesmo que outra conta esteja ativa no `gh` (o Mac também tem a RayPesquisa,
+    que não pode mexer neste repositório: em 23/11/2026 o "Buscar agora" deu HTTP 403 por isso)."""
     try:
-        r = subprocess.run(list(args), cwd=RAIZ, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(["gh", "auth", "token", "--user", DONO], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def _cmd(*args: str, timeout: int = 120) -> tuple[bool, str]:
+    """Roda git/gh na pasta do projeto, sempre com a conta dona do monitor. Devolve (deu_certo, saída)."""
+    args_l, env = list(args), None
+    if args_l and args_l[0] in ("gh", "git"):
+        token = _token_do_dono()
+        if token and args_l[0] == "gh":
+            env = {**os.environ, "GH_TOKEN": token}
+        elif token:  # git: a senha vem da variável de ambiente (não fica no comando nem em arquivo)
+            env = {**os.environ, "MONITOR_GH_TOKEN": token}
+            args_l[1:1] = ["-c", "credential.helper=", "-c", "credential.helper=!f() { echo "
+                           f'"username={DONO}"; echo "password=$MONITOR_GH_TOKEN"; }}; f']
+    try:
+        r = subprocess.run(args_l, cwd=RAIZ, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
     return r.returncode == 0, (r.stdout + r.stderr).strip()
@@ -1907,13 +1929,18 @@ def tela_publicar() -> None:
         st.info("O projeto ainda não está ligado ao GitHub.")
         return
     pend = _pendentes()
+    # envios guardados no Mac que não chegaram ao GitHub (ex.: o envio falhou)
+    ok, n = _cmd("git", "rev-list", "--count", "--no-merges", "origin/main..HEAD")
+    presos = int(n) if ok and n.strip().isdigit() else 0
     if pend:
         st.warning("Você tem mudanças **ainda não enviadas** ao GitHub (viagens ou pausas). "
                    "O monitor no GitHub só vê as mudanças depois de publicar.")
+    elif presos:
+        st.warning(f"{presos} envio(s) ficaram **só no Mac** (o envio ao GitHub falhou). Clique em Publicar.")
     else:
         st.caption("Nenhuma mudança de viagens esperando para ser enviada.")
     c1, c2 = st.columns(2)
-    if c1.button("☁️ Publicar no GitHub", type="primary", disabled=not pend,
+    if c1.button("☁️ Publicar no GitHub", type="primary", disabled=not (pend or presos),
                  help="Criptografa suas viagens, envia ao GitHub e já baixa os preços novos."):
         with st.spinner("Publicando…"):
             limpar_auxiliares()

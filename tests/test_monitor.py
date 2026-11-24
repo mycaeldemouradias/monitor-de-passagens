@@ -468,13 +468,15 @@ def test_cotacao_usa_reserva_quando_a_primeira_recusa(monkeypatch):
         def json(self): return self._d
 
     urls = []
-    def falso_get(url, timeout):
+    def falso_get(url, timeout, **k):
         urls.append(url)
-        return Resp(429, {}) if "awesomeapi" in url else Resp(200, {"rates": {"BRL": 5.9}})
+        if "google" in url or "awesomeapi" in url:
+            return Resp(429, {})  # como nos computadores do GitHub
+        return Resp(200, {"usd": {"brl": 5.9}})
     monkeypatch.setattr(base.requests, "get", falso_get)
     base.cotacao_para_brl.cache_clear()
     assert base.cotacao_para_brl("USD") == 5.9
-    assert base.cotacao_para_brl("USD") == 5.9 and len(urls) == 2  # 2ª vez vem do cache
+    assert base.cotacao_para_brl("USD") == 5.9 and len(urls) == 3  # 2ª vez vem do cache
     base.cotacao_para_brl.cache_clear()
 
 
@@ -932,3 +934,26 @@ def test_hospedagem_acompanha_reservas_guardadas(tmp_path):
     lido = ler_config(arq)
     assert lido.acompanhar == [Reserva("porto", date(2027, 2, 18), date(2027, 2, 19))]
     assert lido.grupos[0].links == ["https://www.airbnb.com.br/rooms/9"]
+
+
+def test_cotacao_do_google_e_reserva(monkeypatch):
+    """1º o Google Finance (ao vivo); se ele falhar, a próxima fonte."""
+    from monitor.fontes import base
+
+    class Resp:
+        def __init__(self, texto="", dados=None, status=200):
+            self.text, self._dados, self.status_code = texto, dados, status
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise base.requests.HTTPError(str(self.status_code))
+        def json(self): return self._dados
+
+    pagina = 'xx data:[[[["/g/1",null,"USD / BRL",3,null,[5.93419688,0.0038,0.06,4,4,3],null,5.93] yy'
+    monkeypatch.setattr(base.requests, "get", lambda url, **k: Resp(pagina) if "google" in url else Resp(status=500))
+    base.cotacao_para_brl.cache_clear()
+    assert base.cotacao_para_brl("USD") == 5.93419688
+    monkeypatch.setattr(base.requests, "get", lambda url, **k: Resp("bloqueado") if "google" in url
+                        else Resp(dados={"USDBRL": {"bid": "5.9293"}}))
+    base.cotacao_para_brl.cache_clear()
+    assert base.cotacao_para_brl("USD") == 5.9293
+    base.cotacao_para_brl.cache_clear()
