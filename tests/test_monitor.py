@@ -516,14 +516,16 @@ def test_resumo_diario_uma_vez_por_dia_a_partir_da_hora(tmp_path):
     assert deve_mandar_resumo(est, g, sete_recife + timedelta(days=1))
 
     h = Historico(tmp_path)
-    h.registrar([_oferta(700)], sete_recife - timedelta(hours=30))   # ontem
-    h.registrar([_oferta(650)], sete_recife - timedelta(hours=3))    # hoje
+    h.registrar([_oferta(700)], sete_recife - timedelta(days=15))   # menor histórico, não deve ser mostrado
+    h.registrar([_oferta(650)], sete_recife - timedelta(hours=3))
     h.registrar([_oferta(680)], sete_recife - timedelta(hours=1))
+    h.registrar([_oferta(620)], sete_recife)                        # preço desta rodada
     rota = _rota(id="r", nome="Férias", preco_alvo=500)
     texto = montar_resumo(h.csv, [rota, _rota(id="outra")], sete_recife)
-    assert "Férias — REC → GRU" in texto and "R$ 650,00" in texto
-    assert "▼ R$ 50,00 vs. ontem (R$ 700,00)" in texto and "abaixo de R$ 500,00" in texto
-    assert "outra" in texto and "sem preço nas últimas 24h" in texto
+    assert "Férias — REC → GRU" in texto and "R$ 620,00" in texto
+    assert "R$ 700,00" not in texto and "R$ 650,00" not in texto and "R$ 680,00" not in texto
+    assert "menor já visto" not in texto and "abaixo de R$ 500,00" in texto
+    assert "outra" in texto and "sem preço retornado nesta rodada" in texto
 
 
 def test_partes_em_varios_computadores_e_juntar(tmp_path, monkeypatch):
@@ -675,7 +677,7 @@ def test_ligacao_qualquer_uma_destas_com_minimo_e_maximo(tmp_path):
     assert conflito({"tpa": voos["tpa"]}, opcao_de_oferta(voos_lista["msp10|s"][0], agora), 3, None, nomes) == ""
 
     h = Historico(tmp_path)
-    h.registrar([v for lista in voos_lista.values() for v in lista], agora - timedelta(hours=1))
+    h.registrar([v for lista in voos_lista.values() for v in lista], agora)
     texto = montar_resumo(h.csv, rotas, agora, arq_voos=arq)
     assert "o mais barato não encaixa depois de 'RJ-Tampa'" in texto
     assert "encaixe mais barato: RJ-Tampa 07/02 + esta 10/02 = R$ 2.243,00" in texto

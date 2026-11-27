@@ -1,4 +1,4 @@
-"""Resumo diário no Telegram: o menor preço de cada viagem nas últimas 24h.
+"""Resumo diário no Telegram: o melhor preço encontrado na rodada mais recente.
 
 Sai uma vez por dia, na primeira rodada a partir de `resumo_diario_hora` (hora de Recife). Durante o
 dia, os avisos só saem quando o preço bate uma das regras (preço-alvo, menor já visto ou queda de X%).
@@ -6,7 +6,7 @@ dia, os avisos só saem quando o preço bate uma das regras (preço-alvo, menor 
 from __future__ import annotations
 
 import csv
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,32 +46,25 @@ def montar_resumo(arq_csv: Path, rotas: list[Rota], agora: datetime, todas: list
                 except (KeyError, ValueError):
                     continue
                 linhas.append(l)
-    hoje, ontem = agora - timedelta(hours=24), agora - timedelta(hours=48)
     por_id = {r.id: r for r in (todas or rotas)}
     voos = sem_passado(todos_os_voos(opcoes(linhas), ler_voos(arq_voos) if arq_voos else {}), agora) \
         if any(r.depois_de for r in rotas) else {}
     nomes = {r.id: r.nome or r.id for r in por_id.values()}
-    partes = [f"☀️ Resumo das passagens — {agora.astimezone(FUSO):%d/%m}",
-              "Menor preço de cada viagem nas últimas 24h:"]
+    rodada = agora.astimezone(FUSO)
+    partes = [f"☀️ Resumo das passagens — {rodada:%d/%m}",
+              f"Melhor preço retornado na última rodada ({rodada:%H:%M} Recife):"]
     for rota in rotas:
         da_rota = [l for l in linhas if l.get("rota_id") == rota.id]
-        recentes = [l for l in da_rota if l["_ts"] >= hoje]
-        anteriores = [l for l in da_rota if ontem <= l["_ts"] < hoje]
+        atuais = [l for l in da_rota if l["_ts"] == agora]
         titulo = f"\n✈️ {rota.nome or rota.id} — {rota.origem} → {rota.destino}"
-        if not recentes:
-            partes.append(f"{titulo}\nsem preço nas últimas 24h")
+        if not atuais:
+            partes.append(f"{titulo}\nsem preço retornado nesta rodada")
             continue
-        m = min(recentes, key=lambda l: l["_preco"])
+        # Uma rota pode pesquisar várias datas. Primeiro usamos apenas as ofertas
+        # consolidadas nesta execução e então mostramos a melhor data/preço atual.
+        m = min(atuais, key=lambda l: l["_preco"])
         onde = m["fonte"] + (f" ({m['vendedor']})" if m.get("vendedor") else "")
         texto = f"{titulo}\n💰 {brl(m['_preco'])} · {_datas(m)} · {onde}"
-        if anteriores:
-            antes = min(l["_preco"] for l in anteriores)
-            dif = m["_preco"] - antes
-            texto += (f"\n   {'▼' if dif < 0 else '▲'} {brl(abs(dif))} vs. ontem ({brl(antes)})"
-                      if abs(dif) >= 0.01 else "\n   = igual a ontem")
-        menor = min(l["_preco"] for l in da_rota)
-        if menor < m["_preco"]:
-            texto += f"\n   menor já visto: {brl(menor)}"
         if rota.preco_alvo:
             texto += f"\n   seu aviso: abaixo de {brl(rota.preco_alvo)}"
         anteriores = [a for a in rota.depois_de if a in por_id]
