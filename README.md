@@ -27,7 +27,7 @@ O mesmo alerta não se repete por `reavisar_apos_horas`. A exceção é quando o
 | Fonte | Como acessa | Confiabilidade |
 |---|---|---|
 | `google_flights` | API da SerpApi (dados do Google Flights) | **Alta.** É a fonte principal e cobre quase todas as companhias. |
-| `skiplagged` | Endpoint JSON do próprio site, sem API oficial | Experimental. Preço em US$ convertido para R$. Traz horários, escalas e vendedores; marca ida e volta em 2 bilhetes e *hidden-city*. Em 20/11/2026 trouxe ~300 opções para REC→GRU. |
+| `skiplagged` | MCP oficial do Skiplagged no GitHub; endpoint JSON antigo no Mac, com MCP como contingência | Mostra preços estimados em R$, horários, companhia e link; pode incluir *hidden-city*. O preço e a disponibilidade precisam ser confirmados no link. O MCP informa o número de escalas, mas não os aeroportos/tempos nem o vendedor. |
 | `latam`, `gol`, `azul` | Navegador automatizado (Playwright) | **Baixa no GitHub Actions.** Esses sites bloqueiam robôs vindos de servidores. |
 | `decolar`, `kayak`, `skyscanner` | Navegador automatizado (Playwright) | **Baixa no GitHub Actions**, pelo mesmo motivo. Em 20/11/2026, no Mac, só a `kayak` funcionou; as outras 5 bloquearam. |
 

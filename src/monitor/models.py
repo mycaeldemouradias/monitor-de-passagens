@@ -45,6 +45,7 @@ class Trecho:
     voos: list[str] = field(default_factory=list)                 # ["AD 4153", "LA 3319"]
     conexoes: list[tuple[str, int]] = field(default_factory=list)  # [(aeroporto, minutos)]
     desce_em: str = ""  # hidden-city: aeroporto onde descer (o bilhete segue além do destino)
+    escalas_sem_detalhe: int = 0  # fonte informa a quantidade, mas não os aeroportos/tempos
 
     def __post_init__(self) -> None:
         # sempre o horário local do aeroporto, sem fuso: o Skiplagged manda "…-03:00" e o Google não manda
@@ -54,7 +55,7 @@ class Trecho:
 
     @property
     def escalas(self) -> int:
-        return len(self.conexoes)
+        return len(self.conexoes) + self.escalas_sem_detalhe
 
     def resumo(self) -> str:
         """Ex.: 'qua 10/03 02:25 → 05:40 · AD 4153 · direto'."""
@@ -64,6 +65,10 @@ class Trecho:
             chegada += f" ({self.chegada:%d/%m})"
         if self.conexoes:
             escalas = "escala em " + ", ".join(f"{a} ({m // 60}h{m % 60:02d})" for a, m in self.conexoes)
+            if self.escalas_sem_detalhe:
+                escalas += f" · mais {self.escalas_sem_detalhe} escala(s) sem detalhes"
+        elif self.escalas_sem_detalhe:
+            escalas = f"{self.escalas_sem_detalhe} escala(s), detalhes não informados"
         else:
             escalas = "direto"
         partes = [f"{dia} {self.partida:%d/%m %H:%M} → {chegada}"]
@@ -72,7 +77,10 @@ class Trecho:
         return " · ".join(partes + [escalas])
 
     def conexoes_texto(self) -> str:
-        return "; ".join(f"{a} {m}min" for a, m in self.conexoes)
+        partes = [f"{a} {m}min" for a, m in self.conexoes]
+        if self.escalas_sem_detalhe:
+            partes.append(f"{self.escalas_sem_detalhe} escala(s) sem aeroporto/tempo informado")
+        return "; ".join(partes)
 
 
 DIAS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
@@ -129,14 +137,16 @@ def _trecho_dict(t: Trecho | None) -> dict | None:
     if t is None:
         return None
     return {"partida": t.partida.isoformat(), "chegada": t.chegada.isoformat(), "voos": t.voos,
-            "conexoes": [list(c) for c in t.conexoes], "desce_em": t.desce_em}
+            "conexoes": [list(c) for c in t.conexoes], "desce_em": t.desce_em,
+            "escalas_sem_detalhe": t.escalas_sem_detalhe}
 
 
 def _trecho_de(d: dict | None) -> Trecho | None:
     if not d:
         return None
     return Trecho(partida=datetime.fromisoformat(d["partida"]), chegada=datetime.fromisoformat(d["chegada"]),
-                  voos=list(d["voos"]), conexoes=[(a, int(m)) for a, m in d["conexoes"]], desce_em=d["desce_em"])
+                  voos=list(d["voos"]), conexoes=[(a, int(m)) for a, m in d["conexoes"]],
+                  desce_em=d["desce_em"], escalas_sem_detalhe=int(d.get("escalas_sem_detalhe", 0)))
 
 
 def oferta_para_dict(o: Oferta) -> dict:

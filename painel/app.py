@@ -1117,7 +1117,8 @@ def tela_simulador() -> None:
     for x, r, d, lista_o, _ in escolhidos:
         with st.container(border=True):
             fmt = lambda o: (f"sai {o.partida:%d/%m %H:%M} · chega {o.chegada:%d/%m %H:%M} · " if o.partida and o.chegada else "") + \
-                f"{brl(o.preco)} · {NOMES_FONTES.get(o.fonte, o.fonte)}" + (f" ({o.vendedor})" if o.vendedor else "")
+                f"{brl(o.preco)} · {NOMES_FONTES.get(o.fonte, o.fonte)}" + \
+                (f" · {o.escalas}" if o.escalas else "") + (f" ({o.vendedor})" if o.vendedor else "")
             st.markdown(f"✈️ **{lista_o[0].origem} → {lista_o[0].destino}** · {nomes.get(r, r)} · {d:%d/%m/%Y}")
             i = st.selectbox("Voo", range(len(lista_o)), format_func=lambda i: fmt(lista_o[i]), key=f"sim_voo_{x}",
                              help="Todos os voos guardados desse dia (o mais barato vem primeiro).")

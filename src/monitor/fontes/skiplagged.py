@@ -1,11 +1,9 @@
-"""Skiplagged (endpoint JSON usado pelo próprio site).
+"""Fonte Skiplagged.
 
-EXPERIMENTAL: não é uma API pública documentada. O formato pode mudar ou o site pode
-bloquear a requisição. Os preços vêm em centavos de dólar (o parâmetro de moeda é ignorado
-pela API; o site converte no navegador) e são convertidos para BRL pela cotação do dia
-(AwesomeAPI).
+No GitHub usa o MCP oficial do Skiplagged. No Mac mantém compatibilidade com o endpoint
+JSON antigo, não documentado e sujeito a mudanças ou bloqueios.
 
-Formato observado em 20/11/2026:
+Formato legado observado em 20/11/2026:
 - `itineraries.outbound`: voos de ida, com `one_way_price` (só ida) e, na busca de ida e
   volta, `min_round_trip_price` (total da viagem).
 - `itineraries.inbound`: voos de volta, só com o preço avulso do trecho. Não serve como
@@ -18,6 +16,8 @@ Formato observado em 20/11/2026:
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -28,6 +28,7 @@ from ..models import Consulta, Oferta, Trecho
 from .base import UA, Fonte, FonteBloqueada, cotacao_para_brl
 
 URL = "https://skiplagged.com/api/search.php"
+MCP_URL = "https://mcp.skiplagged.com/mcp"
 #: quantas opções (as mais baratas) viram ofertas por busca
 MAX_OFERTAS = 8
 #: além das mais baratas, a mais barata de cada faixa de horário de saída (para montar roteiros que
@@ -35,6 +36,32 @@ MAX_OFERTAS = 8
 FAIXA_HORAS = 3
 #: quantas vezes pedir de novo quando a resposta vem parcial
 TENTATIVAS_INCOMPLETO = 6  # ~30s: o site demora até achar todos os preços
+
+
+def _json_sse(texto: str) -> dict[str, Any]:
+    """Lê a mensagem JSON do transporte SSE usado pelo MCP remoto."""
+    try:
+        bruto = json.loads(texto)
+    except ValueError:
+        bruto = None
+        for linha in texto.splitlines():
+            if linha.startswith("data:"):
+                try:
+                    bruto = json.loads(linha[5:].strip())
+                    break
+                except ValueError:
+                    continue
+    if not isinstance(bruto, dict):
+        raise ValueError("Resposta inválida do MCP do Skiplagged")
+    return bruto
+
+
+def _voos_id(identificador: str) -> list[str]:
+    """Extrai códigos de voo quando o MCP os inclui no identificador do cartão."""
+    achado = re.search(r"trip=([^&#]+)", identificador)
+    if not achado:
+        return []
+    return [x for x in re.split(r"[,~]+", achado.group(1)) if x]
 
 
 def _precos_em_centavos(dados: dict[str, Any], ida_volta: bool) -> list[tuple[int, str]]:
@@ -115,6 +142,12 @@ class Skiplagged(Fonte):
         self.limite_por_execucao = max_por_rodada
 
     def buscar(self, c: Consulta) -> list[Oferta]:
+        # A API antiga agora devolve HTTP 403 nos runners do GitHub (Cloudflare). O
+        # MCP oficial é a interface suportada pelo próprio Skiplagged e retorna os
+        # mesmos dados úteis sem exigir sessão ou chave.
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            return self._buscar_mcp(c)
+
         params = {
             "from": c.origem, "to": c.destino, "depart": c.ida.isoformat(),
             "return": c.volta.isoformat() if c.volta else "", "format": "v3",
@@ -127,6 +160,8 @@ class Skiplagged(Fonte):
                              headers={"User-Agent": UA, "Accept": "application/json",
                                       "Referer": "https://skiplagged.com/"})
             if r.status_code in (403, 429) or "captcha" in r.text[:2000].lower():
+                if r.status_code == 403 or "captcha" in r.text[:2000].lower():
+                    return self._buscar_mcp(c)
                 raise FonteBloqueada(f"Skiplagged bloqueou a requisição (HTTP {r.status_code})")
             r.raise_for_status()
             dados = r.json()
@@ -139,6 +174,113 @@ class Skiplagged(Fonte):
             for o in ofertas:
                 o.avisos.append("resultado parcial do Skiplagged (pode haver opção mais barata)")
         return ofertas
+
+    def _buscar_mcp(self, c: Consulta) -> list[Oferta]:
+        """Busca pelo servidor MCP oficial do Skiplagged (JSON-RPC sobre HTTP)."""
+        argumentos: dict[str, Any] = {
+            "origin": c.origem,
+            "destination": c.destino,
+            "departureDate": c.ida.isoformat(),
+            "currency": "BRL",
+            "adults": c.adultos,
+            "fareClass": {"economica": "economy", "premium": "premium",
+                          "executiva": "business", "primeira": "first"}.get(c.cabine, "economy"),
+            "includeHiddenCity": True,
+            "includeStandard": True,
+            "includeVirtualInterlining": True,
+            "limit": 100,
+            "sort": "price",
+        }
+        if c.volta:
+            argumentos["returnDate"] = c.volta.isoformat()
+        resposta = requests.post(
+            MCP_URL,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "sk_flights_search", "arguments": argumentos}},
+            timeout=90,
+            headers={"Accept": "application/json, text/event-stream",
+                     "MCP-Protocol-Version": "2025-03-26"},
+        )
+        if resposta.status_code in (403, 429):
+            raise FonteBloqueada(f"MCP do Skiplagged limitou a busca (HTTP {resposta.status_code})")
+        resposta.raise_for_status()
+        pacote = _json_sse(resposta.text)
+        if pacote.get("error"):
+            raise RuntimeError("MCP do Skiplagged retornou erro na busca")
+        resultado = pacote.get("result") or {}
+        if resultado.get("isError"):
+            mensagem = " ".join(str(x.get("text", "")) for x in resultado.get("content", [])
+                                 if isinstance(x, dict))
+            if "limit" in mensagem.lower() or "wait" in mensagem.lower():
+                raise FonteBloqueada("MCP do Skiplagged atingiu o limite de buscas")
+            raise RuntimeError("MCP do Skiplagged não conseguiu completar a busca")
+        estruturado = resultado.get("structuredContent") or {}
+        if not isinstance(estruturado, dict) or not isinstance(estruturado.get("flights"), list):
+            raise RuntimeError("MCP do Skiplagged retornou uma resposta sem resultados estruturados")
+        return self._interpretar_mcp(estruturado, c)
+
+    def _interpretar_mcp(self, dados: dict[str, Any], c: Consulta) -> list[Oferta]:
+        """Converte os cartões estruturados do MCP no modelo comum do monitor."""
+        cambio = (dados.get("pricing") or {}).get("rate")
+        ofertas: list[Oferta] = []
+        for voo in dados.get("flights") or []:
+            if not isinstance(voo, dict):
+                continue
+            preco = (voo.get("price") or {}).get("amount")
+            partida, chegada = voo.get("departure") or {}, voo.get("arrival") or {}
+            try:
+                p = datetime.fromisoformat(partida["dateTime"])
+                q = datetime.fromisoformat(chegada["dateTime"])
+                valor = float(preco)
+            except (KeyError, TypeError, ValueError):
+                continue
+            attrs = [str(a).lower() for a in voo.get("attributes") or []]
+            qtd_escalas = voo.get("layovers", 0)
+            qtd_escalas = max(0, int(qtd_escalas)) if isinstance(qtd_escalas, (int, float)) else 0
+            ida = Trecho(partida=p, chegada=q, voos=_voos_id(str(voo.get("id", ""))),
+                         escalas_sem_detalhe=qtd_escalas)
+            volta = None
+            retorno = voo.get("returnFlight")
+            if isinstance(retorno, dict):
+                try:
+                    escalas_volta = retorno.get("layovers", 0)
+                    escalas_volta = max(0, int(escalas_volta)) if isinstance(escalas_volta, (int, float)) else 0
+                    volta = Trecho(
+                        partida=datetime.fromisoformat(retorno["departure"]["dateTime"]),
+                        chegada=datetime.fromisoformat(retorno["arrival"]["dateTime"]),
+                        voos=[str(retorno.get("airlines", ""))] if retorno.get("airlines") else [],
+                        escalas_sem_detalhe=escalas_volta,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    volta = None
+            avisos = []
+            if "hidden-city" in attrs:
+                avisos.append("opção hidden-city; confira as condições antes de reservar")
+            duracao = str(voo.get("duration") or "")
+            escalas = qtd_escalas
+            detalhes = f"Duração: {duracao}" if duracao else ""
+            if isinstance(escalas, (int, float)) and escalas:
+                detalhes = f"{detalhes} · {int(escalas)} escala(s)" if detalhes else f"{int(escalas)} escala(s)"
+                avisos.append("o Skiplagged não detalha os aeroportos nem os tempos das escalas")
+            if cambio:
+                detalhes = f"{detalhes} · câmbio aproximado do Skiplagged" if detalhes else "câmbio aproximado do Skiplagged"
+            ofertas.append(Oferta(
+                consulta=c, fonte=self.nome, preco=round(valor, 2), moeda="BRL",
+                companhia=str(voo.get("airlines") or ""), detalhes=detalhes,
+                link=str(voo.get("deepLink") or dados.get("searchUrl") or ""),
+                ida=ida, volta=volta, avisos=avisos,
+            ))
+        if not ofertas:
+            return []
+        escolhidos = sorted(ofertas, key=lambda o: o.preco)[:MAX_OFERTAS]
+        faixas: dict[int, Oferta] = {}
+        for o in sorted(ofertas, key=lambda x: x.preco):
+            if o.ida:
+                faixas.setdefault(o.ida.partida.hour // FAIXA_HORAS, o)
+        for o in faixas.values():
+            if o not in escolhidos:
+                escolhidos.append(o)
+        return escolhidos
 
     def interpretar(self, dados: dict[str, Any], c: Consulta, cotacao=cotacao_para_brl) -> list[Oferta]:
         achados = _precos_em_centavos(dados, c.ida_volta)
