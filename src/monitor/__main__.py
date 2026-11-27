@@ -180,6 +180,8 @@ def executar(args: argparse.Namespace) -> int:
             log.error("%s", e)
             r["puladas"] = len(consultas)
             continue
+        if args.max_por_fonte is not None and hasattr(fonte, "limite_por_execucao"):
+            fonte.limite_por_execucao = max(1, args.max_por_fonte)
         ok, motivo = fonte.disponivel()
         if not ok:
             log.warning("Fonte %s indisponível: %s", nome_fonte, motivo)
@@ -421,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--simular", action="store_true", help="não notifica nem grava nada")
     p.add_argument("--excluir-fontes", nargs="*", help="todas as fontes, menos estas")
     p.add_argument("--parte", help="I/N: faz só a parte I de N das buscas (para dividir entre computadores)")
+    p.add_argument("--max-por-fonte", type=int,
+                   help="limite desta execução para fontes com cota por rodada (ex.: repescagem distribuída)")
     p.add_argument("--salvar-ofertas", help="só busca e salva o resultado (criptografado) neste arquivo")
     p.add_argument("--incluir-ofertas", nargs="*", help="junta resultados salvos por --salvar-ofertas")
     p.add_argument("--so-faltantes", help="pasta com as partes já feitas: busca só o que ficou faltando")
