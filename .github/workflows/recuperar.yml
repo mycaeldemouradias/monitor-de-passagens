@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: monitor-passagens-recuperacao
+  group: monitor-passagens
   cancel-in-progress: false
 
 env:
@@ -25,12 +25,12 @@ env:
 jobs:
   recuperar:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 2
       matrix:
-        parte: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        parte: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,10 +52,10 @@ jobs:
           pattern: parte-*
           path: feitas
           merge-multiple: true
-      - name: Recuperar buscas faltantes (parte ${{ matrix.parte }} de 20)
+      - name: Recuperar buscas faltantes (parte ${{ matrix.parte }} de 2)
         run: |
           python -m monitor --fontes skiplagged --so-faltantes feitas \
-            --parte ${{ matrix.parte }}/20 --max-por-fonte 150 \
+            --parte ${{ matrix.parte }}/2 --max-por-fonte 1000 \
             --salvar-ofertas recuperacao1-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
@@ -67,12 +67,12 @@ jobs:
   recuperar2:
     needs: recuperar
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 2
       matrix:
-        parte: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        parte: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,10 +100,10 @@ jobs:
           pattern: recuperacao1-*
           path: feitas
           merge-multiple: true
-      - name: Recuperar o que ainda falta (parte ${{ matrix.parte }} de 20)
+      - name: Recuperar o que ainda falta (parte ${{ matrix.parte }} de 2)
         run: |
           python -m monitor --fontes skiplagged --so-faltantes feitas \
-            --parte ${{ matrix.parte }}/20 --max-por-fonte 250 \
+            --parte ${{ matrix.parte }}/2 --max-por-fonte 1000 \
             --salvar-ofertas recuperacao2-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:

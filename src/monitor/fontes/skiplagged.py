@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -136,7 +138,9 @@ def _mais_baratos(vend: dict[str, int]) -> str:
 class Skiplagged(Fonte):
     nome = "skiplagged"
     #: pausa aleatória entre buscas, para não parecer robô
-    pausa_s = (3.0, 8.0)
+    # O MCP começou a responder HTTP 429 quando várias partes consultaram juntas.
+    # O workflow limita a concorrência e cada processo mantém uma pausa mais longa.
+    pausa_s = (8.0, 12.0)
 
     def __init__(self, max_por_rodada: int | None = None):
         self.limite_por_execucao = max_por_rodada
@@ -193,16 +197,41 @@ class Skiplagged(Fonte):
         }
         if c.volta:
             argumentos["returnDate"] = c.volta.isoformat()
-        resposta = requests.post(
-            MCP_URL,
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                  "params": {"name": "sk_flights_search", "arguments": argumentos}},
-            timeout=90,
-            headers={"Accept": "application/json, text/event-stream",
-                     "MCP-Protocol-Version": "2025-03-26"},
-        )
-        if resposta.status_code in (403, 429):
-            raise FonteBloqueada(f"MCP do Skiplagged limitou a busca (HTTP {resposta.status_code})")
+        pedido = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "sk_flights_search", "arguments": argumentos}}
+        cabecalhos = {"Accept": "application/json, text/event-stream",
+                      "MCP-Protocol-Version": "2025-03-26"}
+        resposta = None
+        for tentativa in range(4):
+            try:
+                resposta = requests.post(MCP_URL, json=pedido, timeout=90, headers=cabecalhos)
+            except requests.RequestException:
+                if tentativa == 3:
+                    raise
+                time.sleep((5 * (2 ** tentativa)) + random.uniform(0, 3))
+                continue
+            if resposta.status_code == 429:
+                if tentativa == 3:
+                    raise FonteBloqueada("MCP do Skiplagged manteve o limite (HTTP 429) após novas tentativas")
+                cabecalho = resposta.headers.get("Retry-After")
+                try:
+                    espera = max(1.0, float(cabecalho)) if cabecalho else 0
+                except ValueError:
+                    try:
+                        espera = max(1.0, (parsedate_to_datetime(cabecalho) - datetime.now(timezone.utc)).total_seconds())
+                    except (TypeError, ValueError, OverflowError):
+                        espera = 0
+                if not espera:
+                    espera = (30, 60, 120)[tentativa]
+                time.sleep(espera * random.uniform(0.9, 1.1))
+                continue
+            if resposta.status_code == 403:
+                raise FonteBloqueada("MCP do Skiplagged bloqueou a busca (HTTP 403)")
+            if resposta.status_code >= 500 and tentativa < 3:
+                time.sleep((10 * (2 ** tentativa)) + random.uniform(0, 5))
+                continue
+            break
+        assert resposta is not None
         resposta.raise_for_status()
         pacote = _json_sse(resposta.text)
         if pacote.get("error"):
@@ -211,7 +240,8 @@ class Skiplagged(Fonte):
         if resultado.get("isError"):
             mensagem = " ".join(str(x.get("text", "")) for x in resultado.get("content", [])
                                  if isinstance(x, dict))
-            if "limit" in mensagem.lower() or "wait" in mensagem.lower():
+            mensagem_normalizada = mensagem.lower()
+            if any(x in mensagem_normalizada for x in ("limit", "wait", "rate", "too many", "429")):
                 raise FonteBloqueada("MCP do Skiplagged atingiu o limite de buscas")
             raise RuntimeError("MCP do Skiplagged não conseguiu completar a busca")
         estruturado = resultado.get("structuredContent") or {}

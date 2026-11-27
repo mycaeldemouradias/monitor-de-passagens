@@ -31,9 +31,8 @@ env:
   MONITOR_CHAVE: ${{ secrets.MONITOR_CHAVE }}
 
 jobs:
-  # Quantos computadores o Skiplagged usa: ~12 datas por computador (de 6 a 60). Assim, ao cadastrar viagens
-  # novas, a rodada cresce sozinha e todas as datas são buscadas em toda rodada. O plano gratuito roda 20 ao
-  # mesmo tempo: os outros esperam na fila e começam sozinhos assim que um termina (~8 min cada).
+  # O MCP do Skiplagged respondeu HTTP 429 em rajadas maiores. Usamos até 8 consultas por parte e
+  # 2 workers ao mesmo tempo; as partes restantes ficam na fila e seguem automaticamente.
   planejar:
     if: ${{ !inputs.fontes || contains(inputs.fontes, 'skiplagged') }}
     runs-on: ubuntu-latest
@@ -57,8 +56,8 @@ jobs:
         id: conta
         run: |
           total=$(python -m monitor --fontes skiplagged --listar | sed -n 's/^\[skiplagged\] \([0-9]*\) busca.*/\1/p')
-          n=$(( (${total:-0} + 11) / 12 )); [ "$n" -lt 6 ] && n=6; [ "$n" -gt 60 ] && n=60
-          echo "Skiplagged: ${total:-0} data(s) em $n computadores."
+          n=$(( (${total:-0} + 7) / 8 )); [ "$n" -lt 2 ] && n=2; [ "$n" -gt 256 ] && n=256
+          echo "Skiplagged: ${total:-0} busca(s) em $n partes, até 2 workers simultâneos."
           echo "n=$n" >> "$GITHUB_OUTPUT"
           echo "partes=[$(seq 1 $n | paste -sd, -)]" >> "$GITHUB_OUTPUT"
 
@@ -71,7 +70,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 20   # o máximo do plano gratuito do GitHub
+      max-parallel: 2   # ritmo reduzido para evitar HTTP 429 no MCP do Skiplagged
       matrix:
         parte: ${{ fromJSON(needs.planejar.outputs.partes) }}
     steps:
@@ -99,11 +98,12 @@ jobs:
     needs: skiplagged
     if: ${{ always() && (!inputs.fontes || contains(inputs.fontes, 'skiplagged')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 120
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        parte: [1, 2, 3, 4, 5]
+        parte: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,10 +123,10 @@ jobs:
           pattern: parte-*
           path: feitas
           merge-multiple: true
-      - name: Buscar o que ficou faltando (parte ${{ matrix.parte }} de 5)
+      - name: Buscar o que ficou faltando (parte ${{ matrix.parte }} de 2)
         run: |
           mkdir -p feitas
-          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/5 --salvar-ofertas repescagem-${{ matrix.parte }}.cripto
+          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/2 --max-por-fonte 1000 --salvar-ofertas repescagem-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
           name: parte-r${{ matrix.parte }}
@@ -139,11 +139,12 @@ jobs:
     needs: repescagem
     if: ${{ always() && (!inputs.fontes || contains(inputs.fontes, 'skiplagged')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 120
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        parte: [1, 2, 3]
+        parte: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -163,10 +164,10 @@ jobs:
           pattern: parte-*
           path: feitas
           merge-multiple: true
-      - name: Buscar o que ainda falta (parte ${{ matrix.parte }} de 3)
+      - name: Buscar o que ainda falta (parte ${{ matrix.parte }} de 2)
         run: |
           mkdir -p feitas
-          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/3 --salvar-ofertas repescagem2-${{ matrix.parte }}.cripto
+          python -m monitor --fontes skiplagged --so-faltantes feitas --parte ${{ matrix.parte }}/2 --max-por-fonte 1000 --salvar-ofertas repescagem2-${{ matrix.parte }}.cripto
       - uses: actions/upload-artifact@v4
         with:
           name: parte-s${{ matrix.parte }}
